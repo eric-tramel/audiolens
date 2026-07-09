@@ -2,9 +2,12 @@
 
 The audio adapter is intentionally Gemma-4-specific.  Gemma replaces repeated
 audio placeholder IDs with continuous audio-tower embeddings before entering
-``model.language_model``.  JLens only needs derivatives between decoder
+``model.language_model``. JLens only needs derivatives between decoder
 residual layers, so we run that tower once, detach the exact decoder-boundary
-inputs, and replay the decoder for JLens's expanded gradient batches.
+inputs, and replay the decoder for JLens's expanded gradient batches. The
+three closing positions remain in the internal decoder tensors for exact bf16
+kernel parity, while the IDs returned to JLens end at the audio boundary so
+its valid-position estimator selects audio positions only.
 """
 
 from __future__ import annotations
@@ -147,7 +150,7 @@ def paired_resume_prefix(
 
 @dataclass(frozen=True)
 class AudioLayout:
-    """The audio-only prefix retained for the stock JLens position mask."""
+    """The audio-only prefix exposed to the stock JLens position mask."""
 
     audio_start: int
     n_audio_tokens: int
@@ -174,9 +177,7 @@ def validate_audio_layout(
 ) -> AudioLayout:
     """Validate one contiguous audio span and the stock JLens fit positions.
 
-    The returned ``stop`` is one past the final audio slot.  Removing the
-    closing chat tokens is safe only for the causal Gemma configuration,
-    which :class:`PreparedAudioLensModel` checks separately.
+    The returned ``stop`` is one past the final audio slot.
     """
     from jlens.fitting import valid_position_mask
 
@@ -391,13 +392,14 @@ class PreparedAudioLensModel:
         if not isinstance(masks, dict) or not torch.is_tensor(positions):
             raise AudioFitContractError("decoder call did not contain eager masks/position_ids")
         stop = layout.stop
+        full_len = int(inputs["input_ids"].shape[1])
         sliced_ids = inputs["input_ids"][:, :stop].detach().clone()
         self._prepared = PreparedDecoderInputs(
             input_ids=sliced_ids,
-            inputs_embeds=embeds[:, :stop].detach().clone(),
-            per_layer_inputs=ple[:, :stop].detach().clone(),
-            attention_mask=crop_attention_mapping(masks, stop),
-            position_ids=positions[:, :stop].detach().clone(),
+            inputs_embeds=embeds[:, :full_len].detach().clone(),
+            per_layer_inputs=ple[:, :full_len].detach().clone(),
+            attention_mask=crop_attention_mapping(masks, full_len),
+            position_ids=positions[:, :full_len].detach().clone(),
             layout=layout,
         )
         return sliced_ids
@@ -414,6 +416,10 @@ class PreparedAudioLensModel:
         expected = prepared.input_ids.expand(input_ids.shape[0], -1)
         if not torch.equal(input_ids, expected):
             raise AudioFitContractError("replay IDs do not match the prepared sample")
+        # The internal tensors retain Gemma's three closing positions so the
+        # bf16 decoder uses exactly the same kernels as the ordinary wrapper.
+        # Stock JLens derives its valid indices from the shorter returned IDs,
+        # so neither cotangents nor averaged gradient rows include the suffix.
         batch = input_ids.shape[0]
         masks = {
             name: None if value is None else expand_batch(value, batch)

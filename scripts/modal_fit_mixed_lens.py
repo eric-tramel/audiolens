@@ -415,9 +415,8 @@ def validate_replay() -> str:
     prepared = adapter._prepared  # noqa: SLF001
     if prepared is None:
         raise RuntimeError("adapter did not retain prepared inputs")
-    stop = prepared.layout.stop
     full_activations = {
-        layer: full_recorder.activations[layer][:, :stop].detach().clone()
+        layer: full_recorder.activations[layer].detach().clone()
         for layer in layers
     }
 
