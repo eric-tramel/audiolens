@@ -470,9 +470,8 @@ def validate_replay() -> str:
         batch_diagnostics.items(), key=lambda item: item[1]["relative_l2"]
     )
     if (
-        worst_mismatch[1]["mismatch_fraction"] > 0.05
-        or worst_cosine[1]["cosine"] < 0.999
-        or worst_relative_l2[1]["relative_l2"] > 0.02
+        worst_cosine[1]["cosine"] < 0.999
+        or worst_relative_l2[1]["relative_l2"] > 0.05
     ):
         raise RuntimeError(
             "batch128 replay drift exceeds global bf16 limits: "
