@@ -1,0 +1,108 @@
+# Multilingual anchor vocabulary — moodmic's default.
+#
+# Design: many root terms per emotion (a handful of tokens changing rank in
+# the vocab noise tail reads as mood churn; hundreds of tokens average it
+# out), across en/es/fr/de/it/pt/nl/ru/ja/zh/ko/ar/hi/tr/pl/sv/id. Words the
+# tokenizer splits are dropped automatically at load and the readout is
+# normalized by the RESOLVED token count per cluster, so this same file
+# works across models with different tokenizers. Audit what survives:
+#   uv run python scripts/anchor_report.py anchors/multilingual.yaml
+#
+# Schema: emotion -> [words]  or  emotion -> {words: [...], color: <rich style>}
+
+sadness: [sad, sadness, grief, sorrow, cry, crying, tears, mourning, lonely,
+          despair, misery, mourn, ache, anguish, weep, weeping, sob, sobbing,
+          gloom, gloomy, depressed, depression, melancholy, regret, hopeless,
+          heartbreak, heartbroken, loss, hurt,
+          triste, tristeza, tristesse, chagrin, deuil, traurig, Trauer,
+          Kummer, tristezza, dolore, verdriet, droevig,
+          грусть, печаль, грустный, горе, тоска,
+          悲しい, 悲しみ, 哀, 切ない, 悲伤, 难过, 伤心, 悲哀,
+          슬픔, 슬프다, حزن, حزين, दुख, उदास,
+          üzgün, üzüntü, hüzün, smutek, smutny, żal,
+          ledsen, sorg, sedih, duka]
+surprise: [surprise, surprised, shock, shocked, astonished, amazed, sudden,
+           unexpected, startled, stunned, disbelief, marvel, wow, abrupt,
+           surprising, astonishing, astonishment, unbelievable, incredible,
+           gasp, gasped, staggering, baffled, bewildered, remarkable,
+           sorpresa, asombro, sorprendido, étonnement, étonné, stupéfait,
+           Überraschung, überrascht, erstaunt, verblüfft, stupore, sorpreso,
+           surpresa, espanto, verrassing, verbaasd,
+           удивление, изумление, поразительно, внезапно,
+           驚き, びっくり, 驚く, 意外, 惊讶, 吃惊, 震惊, 突然,
+           놀람, 깜짝, مفاجأة, دهشة, आश्चर्य, हैरान,
+           şaşkın, sürpriz, zaskoczenie, zdziwienie,
+           förvåning, överraskad, kaget, terkejut]
+joy: [joy, happy, happiness, delight, laugh, laughter, smile, celebrate,
+      cheerful, wonderful, glad, thrilled, bliss, joyful, cheer, cheering,
+      elated, ecstatic, glee, merry, radiant, upbeat, fun, lovely, awesome,
+      fantastic, excited, excitement,
+      alegría, feliz, alegre, felicidad, joie, heureux, bonheur, ravi,
+      Freude, glücklich, froh, fröhlich, gioia, felice, allegro,
+      alegria, contente, blij, vreugde, geluk, vrolijk,
+      радость, счастье, счастливый, весело, весёлый,
+      嬉しい, 喜び, 楽しい, 幸せ, 快乐, 开心, 高兴, 幸福, 喜悦,
+      기쁨, 행복, 즐거움, فرح, سعادة, سعيد, खुशी, आनंद,
+      mutlu, sevinç, neşe, radość, szczęście, wesoły,
+      glad, glädje, lycklig, senang, gembira, bahagia]
+disgust: [disgust, disgusting, gross, nausea, filthy, vile, rotten, foul,
+          nasty, slime, rot, sewage, mold, repulsive, sickening, stench,
+          stink, gag, dirty, filth, vomit, puke, ugh, smelly, muck, grime,
+          scum, sucio, 臭, 汚, 吐,
+          asco, repugnancia, asqueroso, dégoût, dégoûtant, répugnant,
+          Ekel, eklig, widerlich, disgusto, schifo, schifoso,
+          nojo, nojento, walging, vies, afschuw,
+          отвращение, мерзость, противно, гадость, мерзкий,
+          嫌悪, 気持ち悪い, 不快, 汚い, 恶心, 厌恶, 讨厌, 肮脏,
+          혐오, 역겨움, 더러움, قرف, اشمئزاز, घृणा,
+          iğrenç, tiksinti, obrzydzenie, wstręt, obrzydliwy,
+          äckel, äcklig, jijik, menjijikkan]
+fear: [fear, afraid, terror, panic, dread, scared, anxious, anxiety, horror,
+       threat, worried, frightened, terrified, terrifying, fearful, alarm,
+       alarmed, nervous, scary, ominous, menacing, paranoid, timid,
+       trembling, shudder, danger, dangerous,
+       miedo, temor, asustado, peligro, peur, crainte, effroi, effrayé,
+       Angst, Furcht, ängstlich, gefährlich, paura, spavento, spaventato,
+       medo, assustado, angst, vrees, bang, eng,
+       страх, боязнь, ужас, страшно, опасно, тревога,
+       怖い, 恐怖, 恐れ, 不安, 危険, 害怕, 恐惧, 可怕, 危险, 紧张,
+       두려움, 공포, 무서움, 불안, خوف, رعب, قلق, डर, भय,
+       korku, korkunç, endişe, strach, lęk, groza,
+       rädsla, skräck, rädd, takut, seram]
+anger: [anger, angry, rage, furious, fury, outrage, hate, hatred, resentment,
+        hostile, mad, irritated, enraged, wrath, livid, indignant, annoyed,
+        annoyance, bitter, spite, temper, scorn, disdain,
+        ira, enojo, rabia, enfado, furioso, odio, colère, rage, fureur,
+        furieux, haine, Wut, Zorn, Ärger, wütend, zornig, Hass,
+        rabbia, collera, furioso, odio, raiva, ódio, furioso,
+        woede, boos, haat, kwaad,
+        гнев, злость, ярость, злой, ненависть, бешенство,
+        怒り, 憤り, 怒る, 憎しみ, 愤怒, 生气, 怒, 憎恨, 讨厌,
+        분노, 화, 증오, غضب, كراهية, गुस्सा, क्रोध,
+        öfke, kızgın, nefret, gniew, złość, wściekłość, nienawiść,
+        ilska, arg, vrede, hat, marah, benci, murka]
+curiosity: [curious, curiosity, wonder, wondering, intrigued, fascinated,
+            fascinating, explore, mystery, puzzle, inquiry, interested,
+            discover, investigate, inquisitive, ponder, pondering, probing,
+            question, questions, enigma, riddle, exploration, examine, keen,
+            curiosidad, curioso, misterio, explorar, curiosité, curieux,
+            mystère, explorer, Neugier, neugierig, Rätsel, geheimnisvoll,
+            curiosità, curioso, mistero, curiosidade, mistério,
+            nieuwsgierig, benieuwd, mysterie,
+            любопытство, интерес, интересно, загадка, тайна,
+            好奇, 好奇心, 不思議, 謎, 興味, 神秘, 疑问, 探索, 有趣,
+            궁금, 호기심, 신기, فضول, غموض, जिज्ञासा, रहस्य,
+            merak, meraklı, gizem, ciekawość, ciekawy, tajemnica, zagadka,
+            nyfiken, nyfikenhet, gåta, penasaran, misteri]
+neutral: [bland, boring, bored, boredom, dull, mundane, ordinary, routine,
+          tedious, meh, plain, flat, unremarkable, monotonous, drab, beige,
+          lukewarm, indifferent,
+          aburrido, monótono, soso, normal, corriente, ennui, ennuyeux,
+          banal, fade, ordinaire, langweilig, Langeweile, eintönig, gewöhnlich,
+          noioso, banale, normale, chato, tédio, comum,
+          saai, verveling, gewoon, alledaags,
+          скучно, скука, обычный, обычно, банально,
+          退屈, 普通, 地味, 平凡, 无聊, 平淡, 普通, 平凡, 一般,
+          지루함, 심심, 평범, ملل, عادي, उबाऊ, सामान्य,
+          sıkıcı, sıradan, nudny, nuda, zwykły, przeciętny,
+          tråkig, vanlig, bosan, biasa]
