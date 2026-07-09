@@ -2,9 +2,13 @@
 biases must divide out through the neutral baseline, and planted own-cluster
 signal must be recovered exactly."""
 
+import copy
 import json
+import math
 import pathlib
 import sys
+
+import pytest
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent.parent / "scripts"))
 
@@ -71,3 +75,135 @@ def test_truncated_tail_skipped(tmp_path):
         f.write('{"clip": "03-01-03-01-01-01-01.wav", "meta": {"emo')  # torn write
     records = an.load_records(path)
     assert all("layers" in r for r in records)
+
+
+def _paired_record(
+    actor: str,
+    emotion: str,
+    intensity: str,
+    rep: str,
+    baseline_mass: dict,
+    candidate_mass: dict,
+) -> dict:
+    row = _record(actor, emotion, intensity, rep, baseline_mass)
+    layers = row.pop("layers")
+    row["readouts"] = {
+        "text400": {"layers": layers},
+        "mixed528": {
+            "layers": {
+                "29": {
+                    "anchor_mass": candidate_mass,
+                    "topk_ids": [1],
+                    "topk_toks": ["x"],
+                }
+            }
+        },
+    }
+    return row
+
+
+def _paired_synthetic() -> list[dict]:
+    rows = []
+    for actor, voice_bias in (("01", 1.0), ("02", 1.7)):
+        neutral = {emotion: 0.01 * voice_bias for emotion in CLUSTERS}
+        for rep in ("01", "02"):
+            rows.append(
+                _paired_record(actor, "neutral", "normal", rep, neutral, neutral)
+            )
+        for acted, cluster in ACTED_TO_CLUSTER.items():
+            for intensity, baseline_lift, candidate_lift in (
+                ("normal", 2.0, 3.0),
+                ("strong", 4.0, 9.0),
+            ):
+                baseline = dict(neutral)
+                candidate = dict(neutral)
+                baseline[cluster] *= baseline_lift
+                candidate[cluster] *= candidate_lift
+                rows.append(
+                    _paired_record(
+                        actor, acted, intensity, "01", baseline, candidate
+                    )
+                )
+    return rows
+
+
+def test_paired_estimands_and_duplicate_actor_weighting():
+    rows = _paired_synthetic()
+    result = an.paired_estimands(
+        rows,
+        layer="29",
+        clusters=CLUSTERS,
+        acted_to_cluster=ACTED_TO_CLUSTER,
+    )
+    expected_own = (math.log(3 / 2) + math.log(9 / 4)) / 2
+    assert abs(result["own_cluster_log_lift_delta"] - expected_own) < 1e-12
+    assert abs(result["strong_minus_normal_log_lift_delta"] - math.log(3 / 2)) < 1e-12
+    # Both actors have different voice baselines but identical lifts; resampling
+    # one actor twice proves baselines are actor-local and duplicate blocks work.
+    duplicate = an.paired_estimands(
+        rows,
+        layer="29",
+        clusters=CLUSTERS,
+        acted_to_cluster=ACTED_TO_CLUSTER,
+        actor_draw=["01", "01"],
+    )
+    assert duplicate == result
+
+
+def test_actor_block_bootstrap_is_seeded_and_recomputes_neutral_baselines():
+    rows = _paired_synthetic()
+    kwargs = {
+        "layer": "29",
+        "clusters": CLUSTERS,
+        "acted_to_cluster": ACTED_TO_CLUSTER,
+        "seed": 42,
+        "n_replicates": 50,
+    }
+    first = an.actor_block_bootstrap(rows, **kwargs)
+    second = an.actor_block_bootstrap(rows, **kwargs)
+    assert first == second
+    for metric in first.values():
+        assert metric["ci_low"] <= metric["estimate"] <= metric["ci_high"]
+
+
+def test_paired_no_improvement_is_a_valid_zero_result():
+    rows = _paired_synthetic()
+    for row in rows:
+        row["readouts"]["mixed528"] = copy.deepcopy(row["readouts"]["text400"])
+    result = an.paired_estimands(
+        rows,
+        layer="29",
+        clusters=CLUSTERS,
+        acted_to_cluster=ACTED_TO_CLUSTER,
+    )
+    assert result == {
+        "own_cluster_log_lift_delta": 0.0,
+        "strong_minus_normal_log_lift_delta": 0.0,
+    }
+
+
+def test_paired_validation_rejects_incomplete_pair_and_curiosity():
+    rows = _paired_synthetic()
+    production_clusters = [cluster for cluster in CLUSTERS if cluster != "curiosity"]
+    for row in rows:
+        for readout in row["readouts"].values():
+            readout["layers"]["29"]["anchor_mass"].pop("curiosity", None)
+    metadata = {
+        "config": {
+            "lenses": {"text400": {}, "mixed528": {}},
+            "read_layers": [29],
+            "anchors": {"clusters": production_clusters},
+            "topk": 1,
+            "n_clips": len(rows),
+        },
+        "completed": True,
+        "n_records": len(rows),
+    }
+    an.validate_paired_records(rows, metadata)
+    broken = copy.deepcopy(rows)
+    broken[0]["readouts"].pop("mixed528")
+    with pytest.raises(ValueError, match="incomplete lens pair"):
+        an.validate_paired_records(broken, metadata)
+    metadata["config"]["anchors"]["clusters"].append("curiosity")
+    with pytest.raises(ValueError, match="curiosity"):
+        an.validate_paired_records(rows, metadata)

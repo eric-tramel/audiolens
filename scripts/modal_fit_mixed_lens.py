@@ -1,0 +1,848 @@
+"""Fit text400, audio32/64/128, and mixed528 Jacobian lenses on Modal.
+
+The fit is content-addressed and uses a committed 128-row LibriSpeech
+manifest.  Expensive work is deliberately gated:
+
+    uv run modal run scripts/modal_fit_mixed_lens.py --stage-only
+    modal volume get audiolens-vol manifests/librispeech_audio_fit_128.jsonl manifests/
+    uv run modal run scripts/modal_fit_mixed_lens.py --validate-replay-only
+    uv run modal run scripts/modal_fit_mixed_lens.py --audio-limit 1
+    uv run modal run scripts/modal_fit_mixed_lens.py
+"""
+
+from __future__ import annotations
+
+import hashlib
+import os
+import pathlib
+import subprocess
+
+import modal
+
+REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
+VOL_MOUNT = "/vol"
+MODEL_ID = "google/gemma-4-E2B-it"
+MANIFEST_NAME = "librispeech_audio_fit_128.jsonl"
+BUNDLED_MANIFEST = f"/root/manifests/{MANIFEST_NAME}"
+VOLUME_MANIFEST = f"{VOL_MOUNT}/manifests/{MANIFEST_NAME}"
+GENERIC_LENS = f"{VOL_MOUNT}/lenses/gemma-4-E2B-it_jacobian_lens.pt"
+GENERIC_LENS_SHA256 = "3a5c5169fa9e1cecf0d2a0561c01f2d099991decdea8740efcba1dba7d741d13"
+
+
+def _git_revision() -> str:
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            text=True,
+            cwd=REPO_ROOT,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        injected = os.environ.get("AUDIOLENS_GIT_REVISION")
+        if injected:
+            return injected
+        raise RuntimeError("cannot determine source Git revision") from None
+
+
+def _source_digest() -> str:
+    relatives = (
+        "pyproject.toml",
+        "uv.lock",
+        "src/audiolens/fitting.py",
+        "scripts/modal_fit_mixed_lens.py",
+    )
+    if all((REPO_ROOT / relative).is_file() for relative in relatives):
+        digest = hashlib.sha256()
+        for relative in relatives:
+            digest.update(relative.encode())
+            digest.update((REPO_ROOT / relative).read_bytes())
+        return digest.hexdigest()
+    injected = os.environ.get("AUDIOLENS_SOURCE_DIGEST")
+    if injected:
+        return injected
+    raise RuntimeError("cannot determine source digest")
+
+
+GIT_REVISION = _git_revision()
+SOURCE_DIGEST = _source_digest()
+
+image = (
+    modal.Image.debian_slim(python_version="3.12")
+    .apt_install("git", "ffmpeg")
+    .uv_sync(
+        uv_project_dir=str(REPO_ROOT), frozen=True, groups=["fit"], gpu="H100"
+    )
+    .env(
+        {
+            "HF_HOME": f"{VOL_MOUNT}/hf",
+            "AUDIOLENS_GIT_REVISION": GIT_REVISION,
+            "AUDIOLENS_SOURCE_DIGEST": SOURCE_DIGEST,
+        }
+    )
+    .add_local_python_source("audiolens")
+    .add_local_dir(str(REPO_ROOT / "manifests"), remote_path="/root/manifests")
+)
+
+app = modal.App("audiolens-mixed-fit", image=image)
+vol = modal.Volume.from_name("audiolens-vol", create_if_missing=True)
+
+
+def _audio_messages(audio):
+    return [{"role": "user", "content": [{"type": "audio", "audio": audio}]}]
+
+
+def _load_model():
+    import torch
+    import transformers
+
+    from audiolens.fitting import MODEL_REVISION
+
+    processor = transformers.AutoProcessor.from_pretrained(
+        MODEL_ID, revision=MODEL_REVISION
+    )
+    hf = transformers.AutoModelForImageTextToText.from_pretrained(
+        MODEL_ID,
+        revision=MODEL_REVISION,
+        dtype=torch.bfloat16,
+        device_map="cuda",
+        attn_implementation="eager",
+    ).eval()
+    return processor, hf
+
+
+def _runtime_identity() -> dict:
+    import importlib.metadata
+    import os
+
+    import torch
+
+    packages = [
+        "accelerate",
+        "datasets",
+        "huggingface-hub",
+        "modal",
+        "soundfile",
+        "torch",
+        "transformers",
+    ]
+    return {
+        "packages": {name: importlib.metadata.version(name) for name in packages},
+        "python": os.sys.version,
+        "cuda": torch.version.cuda,
+        "device": torch.cuda.get_device_name(0),
+        "modal_environment": {
+            key: os.environ[key]
+            for key in ("MODAL_IMAGE_ID", "MODAL_CLOUD_PROVIDER", "MODAL_REGION")
+            if key in os.environ
+        },
+    }
+
+
+def _read_manifest(path: str):
+    from audiolens.fitting import audit_manifest_rows, load_jsonl
+
+    rows = load_jsonl(path)
+    audit_manifest_rows(rows)
+    return rows
+
+
+@app.function(
+    cpu=4.0,
+    memory=16_384,
+    timeout=60 * 60,
+    volumes={VOL_MOUNT: vol},
+    secrets=[modal.Secret.from_name("huggingface")],
+)
+def stage_manifest() -> str:
+    """Select and atomically stage the exact 64-clean/64-other fit corpus."""
+    import io
+    import os
+    import pathlib
+    import shutil
+
+    import soundfile as sf
+    import transformers
+    from datasets import load_dataset
+
+    from audiolens.fitting import (
+        FIT_SEED,
+        LIBRISPEECH_REVISION,
+        MODEL_REVISION,
+        AudioFitContractError,
+        audit_manifest_rows,
+        audit_audio_manifest_files,
+        describe_audio_sample,
+        write_canonical_jsonl,
+    )
+
+    manifest_path = pathlib.Path(VOLUME_MANIFEST)
+    final_root = pathlib.Path(
+        f"{VOL_MOUNT}/fit_data/librispeech-{LIBRISPEECH_REVISION[:12]}-seed{FIT_SEED}"
+    )
+    if manifest_path.is_file() and final_root.is_dir():
+        rows = _read_manifest(str(manifest_path))
+        processor = transformers.AutoProcessor.from_pretrained(
+            MODEL_ID, revision=MODEL_REVISION
+        )
+        audit_audio_manifest_files(rows, processor, int(processor.audio_token_id))
+        return f"{manifest_path} already staged ({len(rows)} rows)"
+
+    processor = transformers.AutoProcessor.from_pretrained(
+        MODEL_ID, revision=MODEL_REVISION
+    )
+    audio_id = int(processor.audio_token_id)
+    tmp_root = final_root.with_name(f"{final_root.name}.tmp.{os.getpid()}")
+    if tmp_root.exists():
+        shutil.rmtree(tmp_root)
+    if final_root.exists():
+        shutil.rmtree(final_root)
+    tmp_root.mkdir(parents=True)
+
+    rows: list[dict] = []
+    speakers: set[str] = set()
+    strata = (("clean", "train.100"), ("other", "train.500"))
+    for config, split in strata:
+        print(f"filling 10,000-row shuffle buffer for {config}/{split}...")
+        selected = 0
+        dataset = load_dataset(
+            "openslr/librispeech_asr",
+            config,
+            split=split,
+            revision=LIBRISPEECH_REVISION,
+            streaming=True,
+        ).decode(False)
+        dataset = dataset.shuffle(seed=FIT_SEED, buffer_size=10_000)
+        for source in dataset:
+            speaker = str(source["speaker_id"])
+            if speaker in speakers or not str(source["text"]).strip():
+                continue
+            audio_spec = source["audio"]
+            blob = audio_spec.get("bytes")
+            if not blob:
+                continue
+            try:
+                info = sf.info(io.BytesIO(blob))
+            except sf.LibsndfileError:
+                continue
+            duration = info.frames / info.samplerate
+            if info.samplerate != 16_000 or info.channels != 1 or not 2.0 <= duration <= 4.0:
+                continue
+            audio, sample_rate = sf.read(
+                io.BytesIO(blob), dtype="float32", always_2d=False
+            )
+            if sample_rate != 16_000 or audio.ndim != 1:
+                continue
+            sample_id = str(source["id"])
+            filename = sample_id.replace("/", "_") + ".flac"
+            staged_path = tmp_root / filename
+            staged_path.write_bytes(blob)
+            try:
+                descriptor = describe_audio_sample(processor, staged_path, audio_id)
+            except AudioFitContractError:
+                staged_path.unlink()
+                continue
+            rows.append(
+                {
+                    "dataset": "openslr/librispeech_asr",
+                    "revision": LIBRISPEECH_REVISION,
+                    "config": config,
+                    "split": split,
+                    "selection_index": len(rows),
+                    "id": sample_id,
+                    "speaker_id": source["speaker_id"],
+                    "chapter_id": source["chapter_id"],
+                    "transcript": str(source["text"]).strip(),
+                    **descriptor.manifest_fields,
+                    "volume_path": str(final_root / filename),
+                }
+            )
+            speakers.add(speaker)
+            selected += 1
+            if selected % 16 == 0:
+                print(f"{config}/{split}: selected {selected}/64")
+            if selected == 64:
+                break
+        if selected != 64:
+            raise RuntimeError(f"selected only {selected}/64 rows for {config}/{split}")
+
+    audit_manifest_rows(rows)
+    tmp_root.replace(final_root)
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    write_canonical_jsonl(manifest_path, rows)
+    vol.commit()
+    return f"{manifest_path}: staged 128 rows at {final_root}"
+
+
+@app.function(
+    cpu=4.0,
+    memory=16_384,
+    timeout=60 * 60,
+    volumes={VOL_MOUNT: vol},
+    secrets=[modal.Secret.from_name("huggingface")],
+)
+def restore_staged_audio() -> str:
+    """Reconstruct the committed manifest's exact FLACs on a fresh volume."""
+    import os
+    import pathlib
+    import shutil
+
+    import transformers
+    from datasets import load_dataset
+
+    from audiolens.fitting import (
+        AudioFitContractError,
+        LIBRISPEECH_REVISION,
+        MODEL_REVISION,
+        audit_audio_manifest_files,
+        sha256_bytes,
+        sha256_file,
+        write_canonical_jsonl,
+    )
+
+    rows = _read_manifest(BUNDLED_MANIFEST)
+    processor = transformers.AutoProcessor.from_pretrained(
+        MODEL_ID, revision=MODEL_REVISION
+    )
+    audio_id = int(processor.audio_token_id)
+    volume_manifest = pathlib.Path(VOLUME_MANIFEST)
+    if volume_manifest.is_file() and sha256_file(volume_manifest) == sha256_file(
+        BUNDLED_MANIFEST
+    ):
+        try:
+            audit_audio_manifest_files(rows, processor, audio_id)
+            return f"{volume_manifest}: exact committed corpus already present"
+        except AudioFitContractError:
+            pass
+
+    final_root = pathlib.Path(rows[0]["volume_path"]).parent
+    if any(pathlib.Path(row["volume_path"]).parent != final_root for row in rows):
+        raise AudioFitContractError("manifest volume paths do not share one corpus root")
+    tmp_root = final_root.with_name(f"{final_root.name}.restore.{os.getpid()}")
+    if tmp_root.exists():
+        shutil.rmtree(tmp_root)
+    tmp_root.mkdir(parents=True)
+
+    for config, split in (("clean", "train.100"), ("other", "train.500")):
+        targets = {
+            str(row["id"]): row
+            for row in rows
+            if row["config"] == config and row["split"] == split
+        }
+        remaining = set(targets)
+        dataset = load_dataset(
+            "openslr/librispeech_asr",
+            config,
+            split=split,
+            revision=LIBRISPEECH_REVISION,
+            streaming=True,
+        ).decode(False)
+        for source in dataset:
+            sample_id = str(source["id"])
+            if sample_id not in remaining:
+                continue
+            blob = source["audio"].get("bytes")
+            row = targets[sample_id]
+            if not blob or sha256_bytes(blob) != row["audio_sha256"]:
+                raise AudioFitContractError(f"retrieved audio hash mismatch for {sample_id}")
+            (tmp_root / pathlib.Path(row["volume_path"]).name).write_bytes(blob)
+            remaining.remove(sample_id)
+            if not remaining:
+                break
+        if remaining:
+            raise AudioFitContractError(
+                f"could not retrieve {len(remaining)} committed IDs from {config}/{split}"
+            )
+
+    if final_root.exists():
+        shutil.rmtree(final_root)
+    tmp_root.replace(final_root)
+    audit_audio_manifest_files(rows, processor, audio_id)
+    volume_manifest.parent.mkdir(parents=True, exist_ok=True)
+    write_canonical_jsonl(volume_manifest, rows)
+    vol.commit()
+    return f"{volume_manifest}: restored exact 128-row committed corpus"
+
+
+def _prepared_adapter():
+    from audiolens.fitting import PreparedAudioLensModel
+
+    processor, hf = _load_model()
+    if hasattr(processor.tokenizer, "add_bos_token"):
+        processor.tokenizer.add_bos_token = False
+    return processor, hf, PreparedAudioLensModel(hf, processor)
+
+
+def _selected_gradient_rows(target, sources, valid_positions, dimensions):
+    import torch
+
+    per_source: list[list[torch.Tensor]] = [[] for _ in sources]
+    for index, dimension in enumerate(dimensions):
+        cotangent = torch.zeros_like(target)
+        cotangent[0, valid_positions, dimension] = 1.0
+        grads = torch.autograd.grad(
+            outputs=target,
+            inputs=sources,
+            grad_outputs=cotangent,
+            retain_graph=index < len(dimensions) - 1,
+        )
+        for rows, grad in zip(per_source, grads, strict=True):
+            rows.append(grad[0, valid_positions].float().mean(0).detach().cpu())
+    return [torch.stack(rows) for rows in per_source]
+
+
+@app.function(
+    gpu="H100",
+    timeout=60 * 60,
+    volumes={VOL_MOUNT: vol},
+    secrets=[modal.Secret.from_name("huggingface")],
+)
+def validate_replay() -> str:
+    """Prove prepared replay matches Gemma's ordinary multimodal decoder path."""
+    import torch
+
+    from jlens.hooks import ActivationRecorder
+
+    rows = _read_manifest(BUNDLED_MANIFEST)
+    processor, hf, adapter = _prepared_adapter()
+    from audiolens.fitting import audit_audio_manifest_files
+
+    audit_audio_manifest_files(rows, processor, adapter.audio_id)
+    path = rows[0]["volume_path"]
+    layers = list(range(adapter.n_layers))
+
+    with ActivationRecorder(adapter.layers, at=layers) as full_recorder:
+        replay_ids = adapter.encode(path)
+    prepared = adapter._prepared  # noqa: SLF001
+    if prepared is None:
+        raise RuntimeError("adapter did not retain prepared inputs")
+    stop = prepared.layout.stop
+    full_activations = {
+        layer: full_recorder.activations[layer][:, :stop].detach().clone()
+        for layer in layers
+    }
+
+    with torch.no_grad(), ActivationRecorder(adapter.layers, at=layers) as replay_recorder:
+        adapter.forward(replay_ids)
+    for layer in layers:
+        torch.testing.assert_close(
+            replay_recorder.activations[layer],
+            full_activations[layer],
+            rtol=1e-2,
+            atol=1e-2,
+        )
+    full_logits = adapter.unembed(full_activations[34].float())
+    replay_logits = adapter.unembed(replay_recorder.activations[34].float())
+    torch.testing.assert_close(replay_logits, full_logits, rtol=1e-2, atol=5e-2)
+
+    with torch.no_grad(), ActivationRecorder(adapter.layers, at=layers) as batch_recorder:
+        adapter.forward(replay_ids.expand(128, -1))
+    for layer in layers:
+        torch.testing.assert_close(
+            batch_recorder.activations[layer][0:1],
+            replay_recorder.activations[layer],
+            rtol=1e-2,
+            atol=1e-2,
+        )
+    del batch_recorder, replay_recorder, full_activations
+
+    sources = [0, 29, 33]
+    record_at = [*sources, 34]
+    valid = prepared.layout.valid_mask.nonzero(as_tuple=True)[0].to("cuda")
+    dims = torch.linspace(0, adapter.d_model - 1, 8, device="cuda").long().tolist()
+    full_inputs = processor.apply_chat_template(
+        _audio_messages(path), tokenize=True, return_dict=True, return_tensors="pt"
+    ).to("cuda")
+    with torch.enable_grad(), ActivationRecorder(
+        adapter.layers, at=record_at, start_graph_at=0
+    ) as recorder:
+        hf.model(**full_inputs, use_cache=False)
+        full_rows = _selected_gradient_rows(
+            recorder.activations[34],
+            [recorder.activations[layer] for layer in sources],
+            valid,
+            dims,
+        )
+    with torch.enable_grad(), ActivationRecorder(
+        adapter.layers, at=record_at, start_graph_at=0
+    ) as recorder:
+        adapter.forward(replay_ids)
+        replay_rows = _selected_gradient_rows(
+            recorder.activations[34],
+            [recorder.activations[layer] for layer in sources],
+            valid,
+            dims,
+        )
+    for layer, actual, expected in zip(sources, replay_rows, full_rows, strict=True):
+        cosine = torch.nn.functional.cosine_similarity(
+            actual.flatten(), expected.flatten(), dim=0
+        ).item()
+        relative_l2 = ((actual - expected).norm() / expected.norm()).item()
+        if cosine < 0.999 or relative_l2 > 0.02:
+            raise RuntimeError(
+                f"L{layer} gradient mismatch: cosine={cosine:.6f}, rel_l2={relative_l2:.6f}"
+            )
+    return "prepared replay matches full wrapper: all layers, logits, batch128, gradients"
+
+
+@app.function(
+    gpu="H100",
+    timeout=60 * 60,
+    volumes={VOL_MOUNT: vol},
+    secrets=[modal.Secret.from_name("huggingface")],
+)
+def smoke_audio_fit() -> str:
+    import pathlib
+
+    import jlens
+
+    from audiolens.fitting import FIT_DIM_BATCH, FIT_MAX_SEQ_LEN
+
+    rows = _read_manifest(BUNDLED_MANIFEST)
+    _processor, _hf, adapter = _prepared_adapter()
+    from audiolens.fitting import audit_audio_manifest_files
+
+    audit_audio_manifest_files(rows, _processor, adapter.audio_id)
+    checkpoint = pathlib.Path(f"{VOL_MOUNT}/smoke/audio-one.pt")
+    checkpoint.parent.mkdir(parents=True, exist_ok=True)
+    lens = jlens.fit(
+        adapter,
+        prompts=[rows[0]["volume_path"]],
+        source_layers=[29],
+        target_layer=34,
+        dim_batch=FIT_DIM_BATCH,
+        max_seq_len=FIT_MAX_SEQ_LEN,
+        checkpoint_path=str(checkpoint),
+        checkpoint_every=1,
+        resume=False,
+    )
+    if lens.n_prompts != 1:
+        raise RuntimeError(f"one-sample smoke produced {lens.n_prompts} prompts")
+    vol.commit()
+    return repr(lens)
+
+
+def _wikitext_prompts() -> list[str]:
+    from datasets import load_dataset
+
+    from audiolens.fitting import WIKITEXT_REVISION
+
+    rows = load_dataset(
+        "Salesforce/wikitext",
+        "wikitext-103-raw-v1",
+        split="train",
+        revision=WIKITEXT_REVISION,
+    )
+    prompts: list[str] = []
+    for row in rows:
+        text = row["text"].strip()
+        if len(text) >= 200:
+            prompts.append(text[:2000])
+        if len(prompts) == 400:
+            return prompts
+    raise RuntimeError(f"WikiText yielded only {len(prompts)}/400 prompts")
+
+
+def _ensure_run_json(path: pathlib.Path, config: dict) -> dict:
+    import json
+
+    from audiolens.fitting import AudioFitContractError, atomic_write_json, config_digest
+
+    digest = config_digest(config)
+    if path.exists():
+        run = json.loads(path.read_text())
+        if run.get("config_sha256") != digest or run.get("config") != config:
+            raise AudioFitContractError(f"run config mismatch at {path}")
+        return run
+    run = {"config": config, "config_sha256": digest, "outputs": {}}
+    atomic_write_json(path, run)
+    return run
+
+
+def _lens_change(left, right) -> dict[str, dict[str, float]]:
+    """Per-layer cosine and relative-L2 convergence diagnostics."""
+    import torch
+
+    if left.source_layers != right.source_layers:
+        raise RuntimeError("cannot compare lenses with different source layers")
+    diagnostics = {}
+    for layer in left.source_layers:
+        left_j = left.jacobians[layer].float()
+        right_j = right.jacobians[layer].float()
+        diagnostics[str(layer)] = {
+            "cosine": torch.nn.functional.cosine_similarity(
+                left_j.flatten(), right_j.flatten(), dim=0
+            ).item(),
+            "relative_l2": ((right_j - left_j).norm() / left_j.norm()).item(),
+        }
+    return diagnostics
+
+
+@app.function(
+    gpu="H100",
+    timeout=4 * 60 * 60,
+    volumes={VOL_MOUNT: vol},
+    secrets=[modal.Secret.from_name("huggingface")],
+)
+def fit_all() -> str:
+    import json
+    import pathlib
+
+    import torch
+    import transformers
+
+    import jlens
+
+    from audiolens.fitting import (
+        FIT_DIM_BATCH,
+        FIT_MAX_SEQ_LEN,
+        FIT_SKIP_FIRST,
+        FIT_SOURCE_LAYERS,
+        FIT_TARGET_LAYER,
+        JLENS_REVISION,
+        LIBRISPEECH_REVISION,
+        MODEL_REVISION,
+        PreparedAudioLensModel,
+        WIKITEXT_REVISION,
+        atomic_write_json,
+        canonical_json_bytes,
+        config_digest,
+        fit_checkpoint_metadata,
+        lens_from_fit_checkpoint,
+        sha256_bytes,
+        sha256_file,
+        validate_lens,
+        validate_runtime_lens_file,
+    )
+
+    rows = _read_manifest(BUNDLED_MANIFEST)
+    manifest_sha = sha256_file(BUNDLED_MANIFEST)
+    if sha256_file(VOLUME_MANIFEST) != manifest_sha:
+        raise RuntimeError("bundled and staged manifests differ")
+    prompts = _wikitext_prompts()
+    prompt_hashes = [sha256_bytes(prompt.encode()) for prompt in prompts]
+    wikitext_sha = sha256_bytes(canonical_json_bytes(prompt_hashes))
+    config = {
+        "schema_version": 1,
+        "model": {"id": MODEL_ID, "revision": MODEL_REVISION},
+        "runtime": _runtime_identity(),
+        "source": {"git_revision": GIT_REVISION, "digest": SOURCE_DIGEST},
+        "jlens_revision": JLENS_REVISION,
+        "attention_implementation": "eager",
+        "wikitext": {
+            "dataset": "Salesforce/wikitext",
+            "revision": WIKITEXT_REVISION,
+            "n_prompts": 400,
+            "ordered_prompt_sha256": wikitext_sha,
+        },
+        "audio": {
+            "dataset": "openslr/librispeech_asr",
+            "revision": LIBRISPEECH_REVISION,
+            "n_prompts": 128,
+            "ordered_manifest_sha256": manifest_sha,
+        },
+        "fit": {
+            "source_layers": FIT_SOURCE_LAYERS,
+            "target_layer": FIT_TARGET_LAYER,
+            "skip_first": FIT_SKIP_FIRST,
+            "max_seq_len": FIT_MAX_SEQ_LEN,
+            "dim_batch": FIT_DIM_BATCH,
+            "model_dtype": "bfloat16",
+            "artifact_dtype": "float16",
+        },
+    }
+    digest = config_digest(config)
+    tag = f"gemma-4-E2B-it-mixed-{digest[:12]}"
+    run_path = pathlib.Path(f"{VOL_MOUNT}/runs/{tag}.json")
+    run = _ensure_run_json(run_path, config)
+    checkpoint_dir = pathlib.Path(f"{VOL_MOUNT}/ckpt/{tag}")
+    lens_dir = pathlib.Path(f"{VOL_MOUNT}/lenses")
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    lens_dir.mkdir(parents=True, exist_ok=True)
+    if not pathlib.Path(GENERIC_LENS).is_file():
+        raise RuntimeError(f"required generic lens is missing at {GENERIC_LENS}")
+    generic_before = sha256_file(GENERIC_LENS)
+    if generic_before != GENERIC_LENS_SHA256:
+        raise RuntimeError(f"generic lens has unexpected SHA-256 {generic_before}")
+
+    processor, hf = _load_model()
+    from audiolens.fitting import audit_audio_manifest_files
+
+    audit_audio_manifest_files(rows, processor, int(hf.config.audio_token_id))
+    text_tokenizer = transformers.AutoTokenizer.from_pretrained(
+        MODEL_ID, revision=MODEL_REVISION
+    )
+    text_model = jlens.from_hf(hf, text_tokenizer, force_bos=True)
+    text_checkpoint = checkpoint_dir / "text400.pt"
+    text_lens = jlens.fit(
+        text_model,
+        prompts=prompts,
+        source_layers=FIT_SOURCE_LAYERS,
+        target_layer=FIT_TARGET_LAYER,
+        dim_batch=FIT_DIM_BATCH,
+        max_seq_len=FIT_MAX_SEQ_LEN,
+        skip_first=FIT_SKIP_FIRST,
+        checkpoint_path=str(text_checkpoint),
+        checkpoint_every=5,
+        resume=True,
+    )
+    text_path = lens_dir / f"{tag}-text400.pt"
+    validate_lens(text_lens, 400)
+    text_lens.save(text_path)
+    vol.commit()
+
+    if hasattr(processor.tokenizer, "add_bos_token"):
+        processor.tokenizer.add_bos_token = False
+    audio_model = PreparedAudioLensModel(hf, processor)
+    audio_checkpoint = checkpoint_dir / "audio128.pt"
+    prefix_paths: dict[int, pathlib.Path] = {}
+    prefix_lenses: dict[int, object] = {}
+    audio_lens = None
+    audio_prompts = [row["volume_path"] for row in rows]
+    for prefix in (32, 64, 128):
+        audio_lens = jlens.fit(
+            audio_model,
+            prompts=audio_prompts[:prefix],
+            source_layers=FIT_SOURCE_LAYERS,
+            target_layer=FIT_TARGET_LAYER,
+            dim_batch=FIT_DIM_BATCH,
+            max_seq_len=FIT_MAX_SEQ_LEN,
+            skip_first=FIT_SKIP_FIRST,
+            checkpoint_path=str(audio_checkpoint),
+            checkpoint_every=5,
+            resume=True,
+        )
+        validate_lens(audio_lens, prefix)
+        state = torch.load(audio_checkpoint, map_location="cpu", weights_only=True)
+        if state["n_done"] != prefix or state["next_idx"] != prefix:
+            raise RuntimeError(f"audio checkpoint did not reach exact prefix {prefix}")
+        path = lens_dir / f"{tag}-audio{prefix}.pt"
+        audio_lens.save(path)
+        prefix_paths[prefix] = path
+        prefix_lenses[prefix] = audio_lens
+        vol.commit()
+    if audio_lens is None:
+        raise AssertionError("audio prefixes did not run")
+
+    text_fp32 = lens_from_fit_checkpoint(text_checkpoint, 400)
+    audio_fp32 = lens_from_fit_checkpoint(audio_checkpoint, 128)
+    mixed = jlens.JacobianLens.merge([text_fp32, audio_fp32])
+    validate_lens(mixed, 528)
+    for layer in FIT_SOURCE_LAYERS:
+        expected = (
+            400 * text_fp32.jacobians[layer] + 128 * audio_fp32.jacobians[layer]
+        ) / 528
+        torch.testing.assert_close(mixed.jacobians[layer], expected, rtol=0, atol=0)
+    mixed_path = lens_dir / f"{tag}-mixed528.pt"
+    mixed.save(mixed_path)
+
+    outputs = {
+        "text400": text_path,
+        "audio32": prefix_paths[32],
+        "audio64": prefix_paths[64],
+        "audio128": prefix_paths[128],
+        "mixed528": mixed_path,
+        "text_checkpoint": text_checkpoint,
+        "audio_checkpoint": audio_checkpoint,
+    }
+    runtime_lenses = {
+        "text400": text_lens,
+        "audio32": prefix_lenses[32],
+        "audio64": prefix_lenses[64],
+        "audio128": prefix_lenses[128],
+        "mixed528": mixed,
+    }
+    checkpoint_metadata = {
+        "text_checkpoint": fit_checkpoint_metadata(text_checkpoint, 400),
+        "audio_checkpoint": fit_checkpoint_metadata(audio_checkpoint, 128),
+    }
+    run["outputs"] = {
+        name: {
+            "path": str(path),
+            "sha256": sha256_file(path),
+            "bytes": path.stat().st_size,
+            **(
+                {
+                    "kind": "runtime_lens",
+                    "dtype": "float16",
+                    "n_prompts": runtime_lenses[name].n_prompts,
+                    "d_model": runtime_lenses[name].d_model,
+                    "source_layers": runtime_lenses[name].source_layers,
+                }
+                if name in runtime_lenses
+                else checkpoint_metadata[name]
+            ),
+        }
+        for name, path in outputs.items()
+    }
+    run["convergence"] = {
+        "audio32_to_audio64": _lens_change(prefix_lenses[32], prefix_lenses[64]),
+        "audio64_to_audio128": _lens_change(prefix_lenses[64], prefix_lenses[128]),
+        "text400_to_mixed528": _lens_change(text_fp32, mixed),
+    }
+    run["completed"] = True
+    atomic_write_json(run_path, run)
+    for count, path in ((400, text_path), (32, prefix_paths[32]), (64, prefix_paths[64]),
+                        (128, prefix_paths[128]), (528, mixed_path)):
+        validate_runtime_lens_file(path, count)
+    generic_after = sha256_file(GENERIC_LENS)
+    if generic_after != generic_before:
+        raise RuntimeError("generic lens changed during mixed fit")
+    vol.commit()
+    return json.dumps(
+        {"tag": tag, "run": str(run_path), "outputs": run["outputs"]}, indent=2
+    )
+
+
+@app.local_entrypoint()
+def main(
+    stage_only: bool = False,
+    validate_replay_only: bool = False,
+    audio_limit: int = 128,
+    audit_manifest: str = "",
+):
+    if audit_manifest:
+        from audiolens.fitting import audit_manifest_rows, load_jsonl, sha256_file
+
+        rows = load_jsonl(audit_manifest)
+        audit_manifest_rows(rows)
+        print(f"{audit_manifest}: {len(rows)} rows, sha256={sha256_file(audit_manifest)}")
+        return
+    if stage_only:
+        print(stage_manifest.remote())
+        print(f"download: modal volume get audiolens-vol manifests/{MANIFEST_NAME} manifests/")
+        return
+    if validate_replay_only:
+        print(restore_staged_audio.remote())
+        print(validate_replay.remote())
+        return
+    if audio_limit == 1:
+        print(restore_staged_audio.remote())
+        print(smoke_audio_fit.remote())
+        return
+    if audio_limit != 128:
+        raise SystemExit("--audio-limit supports only 1 (smoke) or 128 (full fit)")
+    status = subprocess.check_output(
+        ["git", "status", "--porcelain"], text=True, cwd=REPO_ROOT
+    )
+    if status.strip():
+        raise SystemExit("full fit requires a clean git worktree so source identity is durable")
+    print(restore_staged_audio.remote())
+    print(fit_all.remote())
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Local structural audit for a downloaded audio-fit manifest."
+    )
+    parser.add_argument("--audit-manifest", required=True)
+    arguments = parser.parse_args()
+    from audiolens.fitting import audit_manifest_rows, load_jsonl, sha256_file
+
+    manifest_rows = load_jsonl(arguments.audit_manifest)
+    audit_manifest_rows(manifest_rows)
+    print(
+        f"{arguments.audit_manifest}: {len(manifest_rows)} rows, "
+        f"sha256={sha256_file(arguments.audit_manifest)}"
+    )
