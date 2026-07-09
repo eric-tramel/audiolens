@@ -134,7 +134,7 @@ def _runtime_identity() -> dict:
         "device": torch.cuda.get_device_name(0),
         "modal_environment": {
             key: os.environ[key]
-            for key in ("MODAL_IMAGE_ID", "MODAL_CLOUD_PROVIDER", "MODAL_REGION")
+            for key in ("MODAL_IMAGE_ID",)
             if key in os.environ
         },
     }
