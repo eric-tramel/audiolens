@@ -75,6 +75,7 @@ image = (
     .env(
         {
             "HF_HOME": f"{VOL_MOUNT}/hf",
+            "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
             "AUDIOLENS_GIT_REVISION": GIT_REVISION,
             "AUDIOLENS_SOURCE_DIGEST": SOURCE_DIGEST,
         }
@@ -129,6 +130,7 @@ def _runtime_identity() -> dict:
         "packages": {name: importlib.metadata.version(name) for name in packages},
         "python": os.sys.version,
         "cuda": torch.version.cuda,
+        "torch_cuda_alloc_conf": os.environ.get("PYTORCH_CUDA_ALLOC_CONF"),
         "device": torch.cuda.get_device_name(0),
         "modal_environment": {
             key: os.environ[key]
