@@ -81,19 +81,23 @@ anger: [anger, angry, rage, furious, fury, outrage, hate, hatred, resentment,
         분노, 화, 증오, غضب, كراهية, गुस्सा, क्रोध,
         öfke, kızgın, nefret, gniew, złość, wściekłość, nienawiść,
         ilska, arg, vrede, hat, marah, benci, murka]
-curiosity: [curious, curiosity, wonder, wondering, intrigued, fascinated,
-            fascinating, explore, mystery, puzzle, inquiry, interested,
-            discover, investigate, inquisitive, ponder, pondering, probing,
-            question, questions, enigma, riddle, exploration, examine, keen,
-            curiosidad, curioso, misterio, explorar, curiosité, curieux,
-            mystère, explorer, Neugier, neugierig, Rätsel, geheimnisvoll,
-            curiosità, curioso, mistero, curiosidade, mistério,
-            nieuwsgierig, benieuwd, mysterie,
-            любопытство, интерес, интересно, загадка, тайна,
-            好奇, 好奇心, 不思議, 謎, 興味, 神秘, 疑问, 探索, 有趣,
-            궁금, 호기심, 신기, فضول, غموض, जिज्ञासा, रहस्य,
-            merak, meraklı, gizem, ciekawość, ciekawy, tajemnica, zagadka,
-            nyfiken, nyfikenhet, gåta, penasaran, misteri]
+# curiosity disabled 2026-07-09: it overwhelmed the readout (top-ranked on
+# nearly everything), drowning out the other emotions. Its cluster likely
+# sits too close to the model's generic "attending to audio/speech" J-space
+# directions. Un-comment to re-enable.
+# curiosity: [curious, curiosity, wonder, wondering, intrigued, fascinated,
+#             fascinating, explore, mystery, puzzle, inquiry, interested,
+#             discover, investigate, inquisitive, ponder, pondering, probing,
+#             question, questions, enigma, riddle, exploration, examine, keen,
+#             curiosidad, curioso, misterio, explorar, curiosité, curieux,
+#             mystère, explorer, Neugier, neugierig, Rätsel, geheimnisvoll,
+#             curiosità, curioso, mistero, curiosidade, mistério,
+#             nieuwsgierig, benieuwd, mysterie,
+#             любопытство, интерес, интересно, загадка, тайна,
+#             好奇, 好奇心, 不思議, 謎, 興味, 神秘, 疑问, 探索, 有趣,
+#             궁금, 호기심, 신기, فضول, غموض, जिज्ञासा, रहस्य,
+#             merak, meraklı, gizem, ciekawość, ciekawy, tajemnica, zagadka,
+#             nyfiken, nyfikenhet, gåta, penasaran, misteri]
 neutral: [bland, boring, bored, boredom, dull, mundane, ordinary, routine,
           tedious, meh, plain, flat, unremarkable, monotonous, drab, beige,
           lukewarm, indifferent,
