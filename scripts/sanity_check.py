@@ -56,7 +56,7 @@ EMOTION_ANCHORS = {
 def main() -> None:
     device = "mps" if torch.backends.mps.is_available() else "cpu"
     hf = transformers.AutoModelForImageTextToText.from_pretrained(
-        MODEL_ID, dtype=torch.float32
+        MODEL_ID, dtype=torch.bfloat16  # matches the fit dtype; fp32 E2B is ~20 GB
     ).to(device).eval()
     tok = transformers.AutoTokenizer.from_pretrained(MODEL_ID)
     model = jlens.from_hf(hf, tok)
@@ -67,24 +67,26 @@ def main() -> None:
     print(f"ref lens: {ref}")
 
     shared = sorted(set(ours.source_layers) & set(ref.source_layers))
-    mid = shared[len(shared) // 2]
+    # Readout resolves late on gemma-4-E2B: L29/L33 show the currency cluster,
+    # mid layers are filler for both lenses (layer sweep, 2026-07-08).
+    late = shared[-5]
 
-    print(f"\n== top-k readout (our lens, L{mid}) ==")
+    print(f"\n== top-k readout (our lens, L{late}) ==")
     for probe in PROBES:
-        lens_logits, _, _ = ours.apply(model, probe, layers=[mid])
-        top = lens_logits[mid][-1].topk(6)
+        lens_logits, _, _ = ours.apply(model, probe, layers=[late])
+        top = lens_logits[late][-1].topk(6)
         print(f"  ...{probe[-45:]!r}")
         print("   -> " + ", ".join(tok.decode([i]) for i in top.indices.tolist()))
 
     print("\n== ours vs neuronpedia base lens (per-position lens-logit correlation) ==")
     for probe in PROBES:
-        ours_logits, _, _ = ours.apply(model, probe, layers=[mid])
-        ref_logits, _, _ = ref.apply(model, probe, layers=[mid])
-        a, b = ours_logits[mid].flatten(), ref_logits[mid].flatten()
+        ours_logits, _, _ = ours.apply(model, probe, layers=[late])
+        ref_logits, _, _ = ref.apply(model, probe, layers=[late])
+        a, b = ours_logits[late].flatten(), ref_logits[late].flatten()
         r = torch.corrcoef(torch.stack([a, b]))[0, 1]
         # top-10 overlap at the final position
-        ours_top = set(ours_logits[mid][-1].topk(10).indices.tolist())
-        ref_top = set(ref_logits[mid][-1].topk(10).indices.tolist())
+        ours_top = set(ours_logits[late][-1].topk(10).indices.tolist())
+        ref_top = set(ref_logits[late][-1].topk(10).indices.tolist())
         print(f"  r={r:.3f}  top10 overlap {len(ours_top & ref_top)}/10  ...{probe[-40:]!r}")
 
     print("\n== mood-anchor vetting on the Gemma tokenizer ==")

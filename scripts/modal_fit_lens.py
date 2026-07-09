@@ -27,6 +27,7 @@ image = (
     .pip_install(
         "torch",
         "transformers>=5.5",
+        "accelerate",
         "datasets>=2.20",
         "huggingface_hub",
         f"jlens @ {JLENS_PIN}",
