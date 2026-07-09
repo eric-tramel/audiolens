@@ -19,6 +19,8 @@ import transformers
 
 import jlens
 
+from audiolens import EMOTION_ANCHORS, single_token_id
+
 MODEL_ID = "google/gemma-4-E2B-it"
 OUR_LENS = "lenses/gemma-4-E2B-it_jacobian_lens.pt"
 REF_REPO = "neuronpedia/jacobian-lens"
@@ -28,29 +30,6 @@ PROBES = [
     "Fact: The currency used in the country shaped like a boot is",
     "The fridge had been unplugged for three weeks, and the smell hit us the moment the door opened.",
 ]
-
-# Mood anchors from jlens-mood (vendored list to avoid a cross-project dep in
-# a sanity script; sync manually if the clusters change).
-EMOTION_ANCHORS = {
-    "sadness": ["sad", "sadness", "grief", "sorrow", "cry", "crying", "tears",
-                "mourning", "lonely", "despair", "misery", "mourn", "ache", "anguish"],
-    "surprise": ["surprise", "surprised", "shock", "shocked", "astonished", "amazed",
-                 "sudden", "unexpected", "startled", "stunned", "disbelief", "marvel",
-                 "wow", "abrupt"],
-    "joy": ["joy", "happy", "happiness", "delight", "laugh", "laughter", "smile",
-            "celebrate", "cheerful", "wonderful", "glad", "thrilled", "bliss"],
-    "disgust": ["disgust", "disgusting", "gross", "nausea", "filthy", "vile",
-                "rotten", "foul", "nasty", "slime", "rot", "sewage", "mold"],
-    "fear": ["fear", "afraid", "terror", "panic", "dread", "scared", "anxious",
-             "anxiety", "horror", "threat", "worried", "frightened"],
-    "anger": ["anger", "angry", "rage", "furious", "fury", "outrage", "hate",
-              "hatred", "resentment", "hostile", "mad", "irritated"],
-    "curiosity": ["curious", "curiosity", "wonder", "wondering", "intrigued",
-                  "fascinated", "fascinating", "explore", "mystery", "puzzle",
-                  "inquiry", "interested", "discover", "investigate"],
-    "neutral": ["bland", "boring", "bored", "boredom", "dull", "mundane",
-                "ordinary", "routine", "tedious", "meh"],
-}
 
 
 def main() -> None:
@@ -91,14 +70,7 @@ def main() -> None:
 
     print("\n== mood-anchor vetting on the Gemma tokenizer ==")
     for emotion, words in EMOTION_ANCHORS.items():
-        dropped = []
-        for w in words:
-            ok = any(
-                len(tok.encode(v, add_special_tokens=False)) == 1
-                for v in (f" {w}", f" {w.capitalize()}")
-            )
-            if not ok:
-                dropped.append(w)
+        dropped = [w for w in words if single_token_id(tok, w) is None]
         status = f"{len(words) - len(dropped)}/{len(words)}"
         print(f"  {emotion:<9} {status}" + (f"  dropped: {dropped}" if dropped else ""))
 
