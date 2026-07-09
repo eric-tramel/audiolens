@@ -7,6 +7,9 @@ no torch/transformers at module level.
 
 from __future__ import annotations
 
+MODEL_ID = "google/gemma-4-E2B-it"
+READ_LAYER = 29  # readout resolves late on gemma-4-E2B (see scripts/sanity_check.py)
+
 # Mood anchors from jlens-mood (vendored to avoid a cross-project dep;
 # sync manually if the clusters change).
 EMOTION_ANCHORS = {
@@ -95,6 +98,30 @@ def resolve_audio_token_id(config, tok) -> int:
     if audio_id is None or audio_id == tok.unk_token_id:
         raise RuntimeError("could not resolve the audio soft-token id")
     return audio_id
+
+
+def load_lensed_model(lens_path: str, *, device: str | None = None):
+    """Load the audio model + processor + fitted lens as one bundle.
+
+    Returns ``(processor, hf, lens_model, lens)``: the raw HF model (for the
+    multimodal forward) and the jlens wrapper (``.layers`` for hooks,
+    ``.unembed``). One loading recipe for the scripts here and downstream
+    consumers (moodmic).
+    """
+    import torch
+    import transformers
+
+    import jlens
+
+    if device is None:
+        device = "mps" if torch.backends.mps.is_available() else "cpu"
+    processor = transformers.AutoProcessor.from_pretrained(MODEL_ID)
+    hf = transformers.AutoModelForImageTextToText.from_pretrained(
+        MODEL_ID, dtype=torch.bfloat16  # matches the fit dtype
+    ).to(device).eval()
+    lens_model = jlens.from_hf(hf, processor.tokenizer)
+    lens = jlens.JacobianLens.from_pretrained(lens_path)
+    return processor, hf, lens_model, lens
 
 
 def mood_readout(lens_logits, anchor_ids: dict[str, list[int]], topk: int = 10):
