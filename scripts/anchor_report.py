@@ -4,8 +4,8 @@ For each cluster: how many token ids it resolves to (both ' word' / ' Word'
 case variants count) and which words contribute nothing. The readout is only
 as robust as this instrument — run it before adopting a new anchors YAML.
 
-    uv run python scripts/anchor_report.py                     # built-in
-    uv run python scripts/anchor_report.py anchors/extended.yaml
+    uv run python scripts/anchor_report.py
+    uv run python scripts/anchor_report.py path/to/anchors.yaml
 """
 
 from __future__ import annotations
@@ -14,15 +14,21 @@ import sys
 
 import transformers
 
-from audiolens import MODEL_ID, anchor_fingerprint, load_anchors, variant_token_ids
+from audiolens import (
+    MODEL_ID,
+    anchor_fingerprint,
+    load_anchors,
+    load_default_anchors,
+    variant_token_ids,
+)
 
 
 def main() -> None:
     path = sys.argv[1] if len(sys.argv) > 1 else None
-    anchors, colors = load_anchors(path)
+    anchors, colors = load_anchors(path) if path else load_default_anchors()
     tok = transformers.AutoProcessor.from_pretrained(MODEL_ID).tokenizer
 
-    print(f"anchors: {path or 'builtin'}  fingerprint: {anchor_fingerprint(anchors)}")
+    print(f"anchors: {path or 'packaged multilingual'}  fingerprint: {anchor_fingerprint(anchors)}")
     total_ids = 0
     for emotion, words in anchors.items():
         per_word = {w: variant_token_ids(tok, w) for w in words}

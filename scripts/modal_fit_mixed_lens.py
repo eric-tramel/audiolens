@@ -27,6 +27,8 @@ BUNDLED_MANIFEST = f"/root/manifests/{MANIFEST_NAME}"
 VOLUME_MANIFEST = f"{VOL_MOUNT}/manifests/{MANIFEST_NAME}"
 GENERIC_LENS = f"{VOL_MOUNT}/lenses/gemma-4-E2B-it_jacobian_lens.pt"
 GENERIC_LENS_SHA256 = "3a5c5169fa9e1cecf0d2a0561c01f2d099991decdea8740efcba1dba7d741d13"
+DEFAULT_PUBLISH_LENSES = "text400,mixed528"
+DEFAULT_ARTIFACT_LICENSE = "cc-by-sa-4.0"
 
 
 def _git_revision() -> str:
@@ -834,13 +836,106 @@ def fit_all() -> str:
     )
 
 
+@app.function(
+    cpu=2.0,
+    memory=4096,
+    timeout=30 * 60,
+    volumes={VOL_MOUNT: vol},
+    secrets=[modal.Secret.from_name("huggingface")],
+)
+def publish_hf_run(
+    run_tag: str,
+    repo_id: str,
+    selected_lenses: str = DEFAULT_PUBLISH_LENSES,
+    artifact_license: str = DEFAULT_ARTIFACT_LICENSE,
+    private: bool = False,
+) -> str:
+    """Publish selected runtime lenses from one completed volume run."""
+    import json
+    import pathlib
+    import tempfile
+
+    from audiolens.hub import prepare_hf_bundle, publish_hf_bundle
+
+    if not run_tag or pathlib.PurePath(run_tag).name != run_tag:
+        raise ValueError("run_tag must be one completed run name")
+    run_path = pathlib.Path(f"{VOL_MOUNT}/runs/{run_tag}.json")
+    with tempfile.TemporaryDirectory(prefix="audiolens-hf-") as temporary:
+        bundle = prepare_hf_bundle(
+            run_path,
+            pathlib.Path(temporary) / "bundle",
+            selected_lenses,
+            artifact_license,
+        )
+        commit = publish_hf_bundle(bundle, repo_id, private=private)
+    commit_url = getattr(commit, "commit_url", None) or getattr(commit, "url", None)
+    return json.dumps(
+        {
+            "repo_id": repo_id,
+            "run": run_tag,
+            "lenses": selected_lenses.split(","),
+            "artifact_license": artifact_license,
+            "private": private,
+            "commit": str(commit_url or commit),
+        },
+        indent=2,
+    )
+
+
 @app.local_entrypoint()
 def main(
     stage_only: bool = False,
     validate_replay_only: bool = False,
     audio_limit: int = 128,
     audit_manifest: str = "",
+    publish_to_hf: str = "",
+    publish_run: str = "",
+    publish_lenses: str = DEFAULT_PUBLISH_LENSES,
+    publish_license: str = DEFAULT_ARTIFACT_LICENSE,
+    publish_private: bool = False,
 ):
+    publish_requested = bool(publish_to_hf)
+    if publish_run and not publish_requested:
+        raise SystemExit("--publish-run requires --publish-to-hf")
+    if not publish_requested and (
+        publish_private
+        or publish_lenses != DEFAULT_PUBLISH_LENSES
+        or publish_license != DEFAULT_ARTIFACT_LICENSE
+    ):
+        raise SystemExit("publication options require --publish-to-hf")
+    if publish_requested:
+        incompatible = []
+        if stage_only:
+            incompatible.append("--stage-only")
+        if validate_replay_only:
+            incompatible.append("--validate-replay-only")
+        if audit_manifest:
+            incompatible.append("--audit-manifest")
+        if audio_limit != 128:
+            incompatible.append("--audio-limit")
+        if incompatible:
+            raise SystemExit(
+                f"--publish-to-hf is incompatible with {', '.join(incompatible)}"
+            )
+        if "/" not in publish_to_hf or publish_to_hf.strip() != publish_to_hf:
+            raise SystemExit("--publish-to-hf must be a namespace/repository ID")
+        names = [name.strip() for name in publish_lenses.split(",")]
+        if not names or any(not name for name in names) or len(names) != len(set(names)):
+            raise SystemExit("--publish-lenses must contain unique comma-separated names")
+        publish_lenses = ",".join(names)
+        if publish_run:
+            if pathlib.PurePath(publish_run).name != publish_run:
+                raise SystemExit("--publish-run must be one completed run tag")
+            print(
+                publish_hf_run.remote(
+                    publish_run,
+                    publish_to_hf,
+                    publish_lenses,
+                    publish_license,
+                    publish_private,
+                )
+            )
+            return
     if audit_manifest:
         from audiolens.fitting import audit_manifest_rows, load_jsonl, sha256_file
 
@@ -868,7 +963,21 @@ def main(
     if status.strip():
         raise SystemExit("full fit requires a clean git worktree so source identity is durable")
     print(restore_staged_audio.remote())
-    print(fit_all.remote())
+    fit_result = fit_all.remote()
+    print(fit_result)
+    if publish_requested:
+        import json
+
+        run_tag = json.loads(fit_result)["tag"]
+        print(
+            publish_hf_run.remote(
+                run_tag,
+                publish_to_hf,
+                publish_lenses,
+                publish_license,
+                publish_private,
+            )
+        )
 
 
 if __name__ == "__main__":

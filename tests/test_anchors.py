@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import pytest
 
-from audiolens import EMOTION_ANCHORS, anchor_fingerprint, load_anchors
+from audiolens import (
+    EMOTION_ANCHORS,
+    anchor_fingerprint,
+    load_anchors,
+    load_default_anchors,
+)
 
 
 def test_default_is_builtin_copy():
@@ -13,6 +18,25 @@ def test_default_is_builtin_copy():
     assert colors == {}
     anchors["joy"].append("mutated")
     assert "mutated" not in EMOTION_ANCHORS["joy"]
+
+
+def test_packaged_multilingual_anchors_have_expected_active_clusters():
+    anchors, colors = load_default_anchors()
+    expected_clusters = {
+        "sadness",
+        "surprise",
+        "joy",
+        "disgust",
+        "fear",
+        "anger",
+        "neutral",
+    }
+
+    assert set(anchors) == expected_clusters
+    assert all(anchors[emotion] for emotion in expected_clusters)
+    assert "alegría" in anchors["joy"]
+    assert "恐怖" in anchors["fear"]
+    assert colors == {}
 
 
 def test_yaml_list_and_dict_forms(tmp_path):

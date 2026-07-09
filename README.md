@@ -1,37 +1,61 @@
-# audiolens 🔍🎧
+# audiolens
 
-J-lens for audio-input LLMs: fit the Jacobian lens on text and genuine audio
-soft-token inputs, then read the workspace over audio positions — mood from
-tone, not just transcript.
+Audiolens fits Jacobian lenses for audio-input language models on text and
+real audio soft-token inputs, then reads the model workspace over audio
+positions. The first target is `google/gemma-4-E2B-it`.
 
-First target: `google/gemma-4-E2B-it` (Apache 2.0, native audio input,
-~2B effective, runs locally). Neuronpedia's base-model `gemma-4-e2b` lens is
-the cross-check reference.
+## Fresh-clone setup
+
+Prerequisites are Git, Python 3.12, [uv](https://docs.astral.sh/uv/), a Modal
+account with the Modal CLI authenticated, and a Hugging Face account with
+access to `google/gemma-4-E2B-it`. From a fresh clone:
 
 ```bash
-uv run modal run scripts/modal_fit_lens.py            # legacy WikiText-only fit
-modal volume get audiolens-vol lenses/gemma-4-E2B-it_jacobian_lens.pt lenses/
-uv run python scripts/sanity_check.py                 # text-side sanity battery
-uv run python scripts/audio_readout.py data/ravdess/Actor_01/*.wav  # local audio smoke
+uv sync --frozen
+uv run modal setup
+uv run modal secret create huggingface HF_TOKEN=<your-hugging-face-token>
 ```
 
-## Mixed WikiText + audio fit
+The `huggingface` Modal secret supplies model/download and opt-in publication
+authentication inside Modal. Do not put a token on an Audiolens command line.
+The shared `audiolens-vol` Modal volume is created by the scripts. Raw fit
+audio, lenses, checkpoints, and evaluation results are regenerated into that
+volume and are not shipped in this repository; only the audited LibriSpeech
+provenance manifest is committed.
+
+The canonical multilingual anchor vocabulary is package data, so installed
+callers do not need a repository-relative path:
+
+```python
+from audiolens import load_default_anchors
+
+anchors, colors = load_default_anchors()
+```
+
+Audit it against the target tokenizer with:
+
+```bash
+uv run python scripts/anchor_report.py
+```
+
+## Mixed WikiText and LibriSpeech fit
 
 The reproducible mixed experiment refits the existing 400-prompt WikiText
 recipe under a locked environment and adds 128 processor-validated
-LibriSpeech utterances: 64 from `clean/train.100`, 64 from `other/train.500`,
-one 2–4 second 16 kHz clip per speaker. The waveform enters Gemma; its paired
-transcript is retained in the committed manifest for provenance only.
+LibriSpeech utterances: 64 from `clean/train.100` and 64 from
+`other/train.500`, with one 2–4 second, 16 kHz clip per speaker. The waveform
+enters Gemma; the paired transcript in the committed manifest is provenance,
+not a separate training example.
 
 Gemma's audio tower runs once per sample. The fitter captures the exact
-audio-conditioned inputs entering the language decoder, then replays only the
-decoder for JLens's gradient batches. It saves audio prefix lenses at 32, 64,
-and 128 examples and merges the fp32 text400/audio128 means with stock
+audio-conditioned inputs entering the language decoder, then replays the
+decoder for JLens gradient batches. It saves audio-prefix lenses at 32, 64,
+and 128 examples and merges the fp32 text400/audio128 means with
 `JacobianLens.merge`. The mixed528 lens is therefore 24.24% audio by prompt
 count, not by token count.
 
 ```bash
-# Select/stage the fixed corpus, then commit the downloaded manifest.
+# Select/stage the fixed corpus, download the manifest, and audit it locally.
 uv run modal run scripts/modal_fit_mixed_lens.py --stage-only
 modal volume get audiolens-vol manifests/librispeech_audio_fit_128.jsonl manifests/
 uv run python scripts/modal_fit_mixed_lens.py \
@@ -47,32 +71,93 @@ The fit is content-addressed by ordered corpus hashes, exact model/data
 revisions, the frozen `uv.lock`, attention backend, code digest, and estimator
 settings. It never overwrites the generic text-only lens.
 
-RAVDESS stays completely held out. The current evaluator loads the new pinned
-text400 baseline and mixed528 candidate together and applies both to the same
-captured residuals from one forward per clip:
+## Opt-in Hugging Face publication
+
+Publication is never automatic. To fit and then immediately publish the
+default `text400,mixed528` runtime lenses:
+
+```bash
+uv run modal run scripts/modal_fit_mixed_lens.py \
+  --publish-to-hf <namespace/repository>
+```
+
+To publish selected runtime lenses from an already completed run without
+rerunning fitting:
+
+```bash
+uv run modal run scripts/modal_fit_mixed_lens.py \
+  --publish-to-hf <namespace/repository> \
+  --publish-run <run-tag> \
+  --publish-lenses text400,mixed528 \
+  --publish-license cc-by-sa-4.0 \
+  --publish-private
+```
+
+`--publish-lenses` is a comma-separated list. `--publish-license` defaults to
+`cc-by-sa-4.0`; `--publish-private` is optional. Each uploaded model repository
+contains only:
+
+- the selected, validated `.pt` runtime lenses;
+- a generated Hugging Face model card (`README.md`); and
+- a sanitized `audiolens-run.json` limited to those lenses.
+
+The publisher verifies completion, runtime-lens kind, file size, and SHA-256.
+It cannot include fit checkpoints, manifests, datasets, evaluation outputs,
+absolute Modal volume paths, or Modal image IDs. Consumers should pin both the
+Hugging Face revision and a trusted expected checksum:
+
+```python
+from audiolens.hub import download_lens
+
+path = download_lens(
+    "<namespace/repository>",
+    "<run-tag>-mixed528.pt",
+    revision="<commit-sha>",
+    expected_sha256="<64-hex-sha256>",
+)
+```
+
+## Optional held-out RAVDESS evaluation
+
+RAVDESS is **not training data**. The optional evaluator downloads the
+upstream speech archive directly from the Zenodo record, verifies its pinned
+SHA-256, and keeps it on the Modal volume. No RAVDESS audio and no generated
+RAVDESS evaluation result is distributed in Git, a wheel, or a Hugging Face
+bundle.
 
 ```bash
 uv run modal run scripts/modal_audio_eval.py \
-  --baseline-lens /vol/lenses/<run>-text400.pt \
-  --candidate-lens /vol/lenses/<run>-mixed528.pt \
+  --baseline-lens /vol/lenses/<run-tag>-text400.pt \
+  --candidate-lens /vol/lenses/<run-tag>-mixed528.pt \
   --limit 3
 uv run modal run scripts/modal_audio_eval.py \
-  --baseline-lens /vol/lenses/<run>-text400.pt \
-  --candidate-lens /vol/lenses/<run>-mixed528.pt
+  --baseline-lens /vol/lenses/<run-tag>-text400.pt \
+  --candidate-lens /vol/lenses/<run-tag>-mixed528.pt
 modal volume get audiolens-vol eval/ravdess-paired-<digest>.jsonl eval/
 modal volume get audiolens-vol eval/ravdess-paired-<digest>.json eval/
 uv run python scripts/analyze_audio_eval.py eval/ravdess-paired-<digest>.jsonl
 ```
 
-The tracked `eval/ravdess_gemma-4-E2B-it.jsonl` is legacy evidence only: it
-predates per-cluster token-count normalization, contains the disabled
-curiosity cluster, and has no lens/anchor/code fingerprint. Never compare or
-resume it as if it were produced by the paired evaluator.
+Downloaded evaluation outputs remain local under the ignored `eval/`
+directory. RAVDESS is CC BY-NC-SA 4.0 and remains subject to its upstream
+terms. The evaluator is a held-out measurement only.
 
 This first mixed fit changes both modality and corpus: without a matched
 long-text control it cannot attribute a result uniquely to audio rather than
 LibriSpeech content. A neutral or negative paired result is still a valid
-experiment outcome and does not promote the mixed lens to MoodMic's default.
+experiment outcome and does not make the mixed lens a downstream default.
 
-Dataset attribution: LibriSpeech is CC BY 4.0; WikiText is CC BY-SA 4.0;
-RAVDESS is CC BY-NC-SA 4.0. Raw training/evaluation audio is not committed.
+## Licenses and provenance
+
+Audiolens source code is MIT licensed; see `LICENSE`. The fitted lens files
+have a separate publisher-selected artifact license, conservatively
+`cc-by-sa-4.0` by default because WikiText is a training input. That artifact
+license does not replace upstream terms.
+
+- Gemma `google/gemma-4-E2B-it`: upstream model card and Apache-2.0 license.
+- Jacobian Lens (`anthropics/jacobian-lens`): Apache-2.0.
+- WikiText-103 (`Salesforce/wikitext`): Wikipedia-derived CC BY-SA/GFDL
+  provenance; the exact pinned revision and ordered prompt hash are recorded.
+- LibriSpeech (`openslr/librispeech_asr`): CC BY 4.0; the exact pinned revision
+  and committed manifest hash are recorded.
+- RAVDESS: CC BY-NC-SA 4.0, held out and never redistributed here.

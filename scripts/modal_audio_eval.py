@@ -1,8 +1,8 @@
-"""Fresh paired RAVDESS evaluation for text400 and mixed528 lenses.
+"""Optional paired RAVDESS evaluation for text400 and mixed528 lenses.
 
 Both lenses read the same captured residuals from one Gemma forward per clip.
-Outputs are content-addressed by model, code, lens, anchor, and scoring identity;
-the legacy ``eval/ravdess_gemma-4-E2B-it.jsonl`` is never resumed or changed.
+RAVDESS is downloaded directly from Zenodo, remains held out from training,
+and is never bundled with Audiolens code or published lens artifacts.
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ SCHEMA_VERSION = 2
 def _source_digest() -> str:
     relatives = (
         "uv.lock",
-        "anchors/multilingual.yaml",
+        "src/audiolens/data/multilingual.yaml",
         "src/audiolens/__init__.py",
         "src/audiolens/fitting.py",
         "scripts/modal_audio_eval.py",
@@ -77,8 +77,9 @@ image = (
             "AUDIOLENS_EVAL_SOURCE_DIGEST": SOURCE_DIGEST,
         }
     )
-    .add_local_python_source("audiolens")
-    .add_local_dir(str(REPO_ROOT / "anchors"), remote_path="/root/anchors")
+    .add_local_python_source(
+        "audiolens", ignore=["**/__pycache__/**", "**/*.pyc"]
+    )
 )
 
 app = modal.App("audiolens-paired-audio-eval", image=image)
@@ -193,7 +194,7 @@ def run_eval(baseline_lens: str, candidate_lens: str, limit: int = 0) -> str:
         ACTED_TO_CLUSTER,
         anchor_fingerprint,
         anchor_token_ids,
-        load_anchors,
+        load_default_anchors,
         mood_readout,
         parse_ravdess_name,
         resolve_audio_token_id,
@@ -212,7 +213,7 @@ def run_eval(baseline_lens: str, candidate_lens: str, limit: int = 0) -> str:
     if len(clips) != RAVDESS_N_CLIPS:
         raise RuntimeError(f"staged RAVDESS has {len(clips)}, expected {RAVDESS_N_CLIPS}")
 
-    anchor_words, _anchor_colors = load_anchors("/root/anchors/multilingual.yaml")
+    anchor_words, _anchor_colors = load_default_anchors()
     if "curiosity" in anchor_words:
         raise RuntimeError("production evaluation anchors unexpectedly include curiosity")
     config = {

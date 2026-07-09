@@ -10,7 +10,7 @@ Reports, per layer: the acted-emotion x anchor-cluster mean-lift matrix, the
 rank of each acted emotion's own cluster, argmax-lift accuracy, and a
 normal-vs-strong intensity split.
 
-    uv run python scripts/analyze_audio_eval.py eval/ravdess_gemma-4-E2B-it.jsonl
+    uv run python scripts/analyze_audio_eval.py eval/ravdess-paired-<digest>.jsonl
 """
 
 from __future__ import annotations

@@ -6,7 +6,7 @@
 # tokenizer splits are dropped automatically at load and the readout is
 # normalized by the RESOLVED token count per cluster, so this same file
 # works across models with different tokenizers. Audit what survives:
-#   uv run python scripts/anchor_report.py anchors/multilingual.yaml
+#   uv run python scripts/anchor_report.py
 #
 # Schema: emotion -> [words]  or  emotion -> {words: [...], color: <rich style>}
 

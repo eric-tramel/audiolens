@@ -1,8 +1,8 @@
-"""Shared audiolens constants and helpers: mood anchors, RAVDESS metadata.
+"""Shared Audiolens constants and helpers.
 
-One canonical copy for the local scripts and the Modal containers (which get
-this package via ``add_local_python_source``). Keep this module import-light:
-no torch/transformers at module level.
+The installed package carries the canonical multilingual mood-anchor
+vocabulary. Keep this module import-light: no torch/transformers at module
+level.
 """
 
 from __future__ import annotations
@@ -113,30 +113,14 @@ def single_token_id(tok, word: str) -> int | None:
     return ids[0] if ids else None
 
 
-def load_anchors(path: str | None = None) -> tuple[dict[str, list[str]], dict[str, str]]:
-    """The anchor vocabulary: ``{emotion: [words]}`` plus optional display
-    colors, from a YAML file or the built-in :data:`EMOTION_ANCHORS`.
-
-    YAML schema — each emotion maps to either a plain word list or
-    ``{words: [...], color: "<rich style>"}``::
-
-        joy: [joy, happy, delight]
-        dread:
-          words: [dread, doom, foreboding]
-          color: dark_orange
-
-    The vocabulary is part of the measurement: baselines record its
-    :func:`anchor_fingerprint`, and lifts refuse to mix vocabularies.
-    """
-    if path is None:
-        return {e: list(ws) for e, ws in EMOTION_ANCHORS.items()}, {}
-    import pathlib
-
+def _parse_anchors_yaml(
+    text: str, source: str
+) -> tuple[dict[str, list[str]], dict[str, str]]:
     import yaml
 
-    data = yaml.safe_load(pathlib.Path(path).read_text())
+    data = yaml.safe_load(text)
     if not isinstance(data, dict) or not data:
-        raise ValueError(f"{path}: expected a mapping of emotion -> words")
+        raise ValueError(f"{source}: expected a mapping of emotion -> words")
     anchors: dict[str, list[str]] = {}
     colors: dict[str, str] = {}
     for emotion, spec in data.items():
@@ -146,9 +130,39 @@ def load_anchors(path: str | None = None) -> tuple[dict[str, list[str]], dict[st
             if spec.get("color"):
                 colors[emotion] = str(spec["color"])
         if not isinstance(words, list) or not all(isinstance(w, str) for w in words):
-            raise ValueError(f"{path}: {emotion!r} needs a list of words")
+            raise ValueError(f"{source}: {emotion!r} needs a list of words")
         anchors[emotion] = words
     return anchors, colors
+
+
+def load_anchors(path: str | None = None) -> tuple[dict[str, list[str]], dict[str, str]]:
+    """Load an anchor YAML path, or the compact built-in English vocabulary.
+
+    YAML schema — each emotion maps to either a plain word list or
+    ``{words: [...], color: "<rich style>"}``. The vocabulary is part of the
+    measurement: baselines record its :func:`anchor_fingerprint`, and lifts
+    refuse to mix vocabularies.
+    """
+    if path is None:
+        return {e: list(ws) for e, ws in EMOTION_ANCHORS.items()}, {}
+    import pathlib
+
+    anchor_path = pathlib.Path(path)
+    return _parse_anchors_yaml(anchor_path.read_text(encoding="utf-8"), str(anchor_path))
+
+
+def load_default_anchors() -> tuple[dict[str, list[str]], dict[str, str]]:
+    """Load the packaged canonical multilingual anchor vocabulary.
+
+    This API works from an installed wheel and does not require a repository
+    checkout or caller-managed resource path.
+    """
+    from importlib.resources import files
+
+    resource = files("audiolens").joinpath("data", "multilingual.yaml")
+    return _parse_anchors_yaml(
+        resource.read_text(encoding="utf-8"), "audiolens:data/multilingual.yaml"
+    )
 
 
 def anchor_fingerprint(anchors: dict[str, list[str]]) -> str:
