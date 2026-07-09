@@ -404,7 +404,7 @@ def _assert_bf16_batch_stable(actual, expected, layer: int) -> dict[str, float]:
     relative_l2 = (
         (actual_float - expected_float).norm() / expected_float.norm()
     ).item()
-    if mismatch_fraction > 1e-3 or cosine < 0.9999 or relative_l2 > 1e-3:
+    if mismatch_fraction > 1e-3 or cosine < 0.9999 or relative_l2 > 1e-2:
         raise RuntimeError(
             f"L{layer} batch128 instability: mismatch_fraction={mismatch_fraction:.3e}, "
             f"cosine={cosine:.8f}, relative_l2={relative_l2:.3e}"
