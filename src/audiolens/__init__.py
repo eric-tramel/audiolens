@@ -217,19 +217,24 @@ def load_lensed_model(lens_path: str, *, device: str | None = None):
     return processor, hf, lens_model, lens
 
 
-def mood_readout(lens_logits, anchor_ids: dict[str, list[int]], topk: int = 10):
-    """The canonical measurement, shared by the local smoke script and the
-    Modal eval so the two surfaces cannot drift: from ``[n_positions, vocab]``
-    lens logits, return (per-cluster MEAN softmax mass per anchor token,
-    averaged over the span, and span-mean top-k token ids).
-
-    Normalizing by the resolved cluster size happens here, dynamically, so
-    clusters of different richness — and different tokenizers resolving
-    different subsets of the vocabulary — stay comparable."""
+def mood_readout_per_position(lens_logits, anchor_ids: dict[str, list[int]]):
+    """Per-POSITION cluster scores from ``[n_positions, vocab]`` lens logits:
+    ``{emotion: [score per position]}``, each score the mean softmax mass per
+    anchor token. Normalizing by the resolved cluster size happens here,
+    dynamically, so clusters of different richness — and different tokenizers
+    resolving different subsets of the vocabulary — stay comparable."""
     probs = lens_logits.softmax(-1)
-    mass = {
-        e: (probs[:, ids].sum(-1).mean().item() / len(ids))
+    return {
+        e: (probs[:, ids].sum(-1) / len(ids)).tolist()
         for e, ids in anchor_ids.items()
     }
+
+
+def mood_readout(lens_logits, anchor_ids: dict[str, list[int]], topk: int = 10):
+    """The canonical span-level measurement, shared by the local smoke script
+    and the Modal eval so the two surfaces cannot drift: the position-mean of
+    :func:`mood_readout_per_position`, plus span-mean top-k token ids."""
+    per_pos = mood_readout_per_position(lens_logits, anchor_ids)
+    mass = {e: sum(v) / len(v) for e, v in per_pos.items()}
     top_ids = lens_logits.mean(0).topk(topk).indices.tolist()
     return mass, top_ids
