@@ -121,9 +121,9 @@ path = download_lens(
 
 RAVDESS is **not training data**. The optional evaluator downloads the
 upstream speech archive directly from the Zenodo record, verifies its pinned
-SHA-256, and keeps it on the Modal volume. No RAVDESS audio and no generated
-RAVDESS evaluation result is distributed in Git, a wheel, or a Hugging Face
-bundle.
+SHA-256, and keeps it on the Modal volume. No RAVDESS audio or generated
+RAVDESS evaluation result is included in the release tree, wheel, or
+Hugging Face bundle.
 
 ```bash
 uv run modal run scripts/modal_audio_eval.py \
