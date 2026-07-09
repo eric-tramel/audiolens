@@ -1,7 +1,7 @@
 """Lens readout over audio token positions — the first audio-side test.
 
-Feeds RAVDESS clips (fixed sentences, acted emotional prosody) through
-gemma-4-E2B-it and reads the text-fit lens at the audio soft-token positions.
+Feeds RAVDESS clips (fixed sentences, acted emotional prosody) through the
+selected audio model and reads the text-fit lens at its prepared audio positions.
 Two questions, in order:
 
 1. Does a text-fit lens read out anything text-like over audio positions
@@ -22,7 +22,6 @@ import argparse
 import pathlib
 
 import torch
-import transformers
 
 import jlens
 from jlens.hooks import ActivationRecorder
@@ -31,19 +30,19 @@ from audiolens import (
     anchor_token_ids,
     mood_readout,
     parse_ravdess_name,
-    resolve_audio_token_id,
 )
-
-MODEL_ID = "google/gemma-4-E2B-it"
-OUR_LENS = "lenses/gemma-4-E2B-it_jacobian_lens.pt"
-READ_LAYER = 29  # readout resolves late on gemma-4-E2B (see sanity_check.py)
-
+from audiolens.models import audio_residuals, get_model_profile, load_model_runtime
 
 def clip_label(path: pathlib.Path) -> str:
     meta = parse_ravdess_name(path.stem)
     if meta is None:
         return path.name
     return f"{meta['emotion']:<9} actor {meta['actor']} \"{meta['statement']}\""
+
+
+def _readout_identity(profile) -> tuple[int, str]:
+    """Canonical single read layer and default lens path for a profile."""
+    return profile.read_layer, f"lenses/{profile.slug}_jacobian_lens.pt"
 
 
 def main() -> None:
@@ -53,35 +52,33 @@ def main() -> None:
     args = parser.parse_args()
 
     device = "mps" if torch.backends.mps.is_available() else "cpu"
-    processor = transformers.AutoProcessor.from_pretrained(MODEL_ID)
-    tok = processor.tokenizer
-    hf = transformers.AutoModelForImageTextToText.from_pretrained(
-        MODEL_ID, dtype=torch.bfloat16  # matches the fit dtype
-    ).to(device).eval()
-    model = jlens.from_hf(hf, tok)
-    lens = jlens.JacobianLens.from_pretrained(OUR_LENS)
-    print(f"lens: {lens}  read layer: L{READ_LAYER}\n")
+    profile = get_model_profile()
+    read_layer, lens_path = _readout_identity(profile)
+    runtime = load_model_runtime(profile.key, device=device)
+    tok = runtime.tokenizer
+    lens = jlens.JacobianLens.from_pretrained(lens_path)
+    print(f"lens: {lens}  read layer: L{read_layer}\n")
 
     anchors = anchor_token_ids(tok)
-    audio_id = resolve_audio_token_id(hf.config, tok)
 
     for wav in args.wavs:
-        messages = [{"role": "user", "content": [{"type": "audio", "audio": str(wav)}]}]
-        inputs = processor.apply_chat_template(
-            messages, tokenize=True, return_dict=True, return_tensors="pt"
-        ).to(device)
-        positions = (inputs["input_ids"][0] == audio_id).nonzero(as_tuple=True)[0]
+        prepared = runtime.prepare_audio(wav)
+        positions = prepared.audio_positions
         if positions.numel() == 0:
             raise RuntimeError(f"{wav}: no audio soft tokens in the prefill")
 
-        with torch.no_grad(), ActivationRecorder(model.layers, at=[READ_LAYER]) as rec:
-            hf(**inputs, use_cache=False)
-        residual = rec.activations[READ_LAYER][0][positions].float()
+        with torch.no_grad(), ActivationRecorder(
+            runtime.layers, at=[read_layer]
+        ) as rec:
+            runtime.forward_audio(prepared)
+        residual = audio_residuals(rec.activations, prepared, read_layer).float()
 
-        lens_logits = model.unembed(lens.transport(residual, READ_LAYER)).float().cpu()
+        lens_logits = runtime.unembed(
+            lens.transport(residual, read_layer)
+        ).float().cpu()
 
         print(f"== {clip_label(wav)}  ({positions.numel()} audio tokens, "
-              f"seq {inputs['input_ids'].shape[1]}) ==")
+              f"seq {prepared.input_ids.shape[1]}) ==")
 
         mass, top_ids = mood_readout(lens_logits, anchors, topk=args.topk)
 
