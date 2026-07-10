@@ -41,7 +41,9 @@ def _source_digest() -> str:
         "src/audiolens/data/multilingual.yaml",
         "src/audiolens/__init__.py",
         "src/audiolens/fitting.py",
-        "src/audiolens/models.py",
+        "src/audiolens/models/__init__.py",
+        "src/audiolens/models/base.py",
+        "src/audiolens/models/gemma4.py",
         "scripts/modal_audio_eval.py",
         "scripts/analyze_audio_eval.py",
     )

@@ -1,114 +1,27 @@
-"""Import-light audio-model profiles and the canonical Gemma runtime adapter.
-
-Profile lookup and the value types in this module do not import Torch,
-Transformers, or JLens. Heavy dependencies are loaded only by preparation or
-runtime construction.
-"""
+"""Gemma 4 family preparation, replay, and runtime adapter."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import Any
 
-if TYPE_CHECKING:
-    from collections.abc import Sequence
-
-    import torch
-    from jlens.protocol import LensModel
-
-
-DEFAULT_MODEL_KEY = "gemma-4-e2b-it"
+from .base import (
+    AudioFitContractError,
+    AudioLayout,
+    AudioModelRuntime,
+    ModelProfile,
+    PreparedAudio,
+)
 
 
-class AudioFitContractError(RuntimeError):
-    """A non-skippable audio preparation or replay contract violation.
-
-    Stock :func:`jlens.fit` catches ``ValueError`` and skips that prompt, so
-    adapter and data contract failures deliberately use a different exception.
-    """
-
-
-class UnknownModelProfileError(KeyError):
-    """Raised when a caller selects an unregistered model profile."""
-
-
-@dataclass(frozen=True, slots=True)
-class ModelProfile:
-    """Immutable execution identity and JLens geometry for one audio model."""
-
-    key: str
-    version: int
-    slug: str
-    model_id: str
-    model_revision: str
-    adapter_source: str
-    d_model: int
-    source_layers: tuple[int, ...]
-    target_layer: int
-    max_sequence_length: int
-    skip_first: int
-    dimension_batch_size: int
-    read_layer: int
-    read_layers: tuple[int, ...]
-
-
-@dataclass(frozen=True, slots=True)
-class AudioLayout:
-    """Decoder layout used to expose only audio positions to JLens fitting."""
-
-    audio_start: int
-    n_audio_tokens: int
-    stop: int
-    n_valid_positions: int
-    valid_mask: Any = field(repr=False)
-
-
-@dataclass(slots=True, eq=False)
-class PreparedAudio:
-    """Opaque model inputs plus explicit decoder-aligned audio positions."""
-
-    model_inputs: Any = field(repr=False)
-    input_ids: Any = field(repr=False)
-    audio_positions: Any = field(repr=False)
-    layout: AudioLayout
-    manifest_fields: dict[str, Any]
-
-
-class AudioModelRuntime(Protocol):
-    """Narrow runtime surface consumed by fit and readout orchestration."""
-
-    profile: ModelProfile
-    processor: Any
-    model: Any
-    tokenizer: Any
-    layers: "Sequence[Any]"
-    text_lens_model: "LensModel"
-    audio_lens_model: "LensModel"
-
-    def unembed(self, residual: "torch.Tensor") -> "torch.Tensor": ...
-
-    def prepare_audio(self, path: str | Path) -> PreparedAudio: ...
-
-    def forward_audio(self, prepared: PreparedAudio) -> Any: ...
-
-def audio_residuals(
-    activations: dict[int, Any], prepared: PreparedAudio, layer: int
-) -> Any:
-    """Select decoder residuals at the adapter-provided audio positions."""
-
-    return activations[layer][0].index_select(0, prepared.audio_positions)
-
-
-
-_DEFAULT_PROFILE = ModelProfile(
-    key=DEFAULT_MODEL_KEY,
+GEMMA4_PROFILE = ModelProfile(
+    key="gemma-4-e2b-it",
     version=1,
     slug="gemma-4-E2B-it",
     model_id="google/gemma-4-E2B-it",
     model_revision="70af34e20bd4b7a91f0de6b22675850c43922a03",
-    adapter_source="audiolens.models:GemmaAudioRuntime",
+    adapter_source="audiolens.models.gemma4:GemmaAudioRuntime",
     d_model=1536,
     source_layers=tuple(range(34)),
     target_layer=34,
@@ -118,21 +31,6 @@ _DEFAULT_PROFILE = ModelProfile(
     read_layer=29,
     read_layers=(23, 29, 33),
 )
-_PROFILES = MappingProxyType({_DEFAULT_PROFILE.key: _DEFAULT_PROFILE})
-DEFAULT_MODEL_PROFILE = _DEFAULT_PROFILE
-
-
-def get_model_profile(key: str = DEFAULT_MODEL_KEY) -> ModelProfile:
-    """Return a built-in profile without importing any ML dependencies."""
-
-    try:
-        return _PROFILES[key]
-    except KeyError:
-        available = ", ".join(sorted(_PROFILES))
-        raise UnknownModelProfileError(
-            f"unknown audio model profile {key!r}; available: {available}"
-        ) from None
-
 
 def resolve_audio_token_id(config: Any, tokenizer: Any) -> int:
     """Resolve Gemma's audio soft-token ID from its pinned runtime contract."""
@@ -161,7 +59,7 @@ def validate_audio_layout(
     input_ids: Any,
     audio_id: int,
     *,
-    profile: ModelProfile = DEFAULT_MODEL_PROFILE,
+    profile: ModelProfile = GEMMA4_PROFILE,
 ) -> AudioLayout:
     """Validate Gemma's contiguous audio span and stock JLens fit positions."""
 
@@ -207,7 +105,7 @@ def prepare_audio(
     processor: Any,
     path: str | Path,
     *,
-    profile: ModelProfile = DEFAULT_MODEL_PROFILE,
+    profile: ModelProfile = GEMMA4_PROFILE,
 ) -> PreparedAudio:
     """Prepare one Gemma audio path without constructing model weights."""
 
@@ -457,19 +355,18 @@ class GemmaAudioRuntime:
         return self.model.model(**prepared.model_inputs, use_cache=False)
 
 
-def load_audio_processor(key: str = DEFAULT_MODEL_KEY) -> Any:
+def load_audio_processor(profile: ModelProfile = GEMMA4_PROFILE) -> Any:
     """Load only the pinned processor for lightweight tokenizer/preparation use."""
 
     import transformers
 
-    profile = get_model_profile(key)
     return transformers.AutoProcessor.from_pretrained(
         profile.model_id, revision=profile.model_revision
     )
 
 
 def load_model_runtime(
-    key: str = DEFAULT_MODEL_KEY,
+    profile: ModelProfile = GEMMA4_PROFILE,
     *,
     device: str | None = None,
     device_map: Any | None = None,
@@ -481,8 +378,7 @@ def load_model_runtime(
 
     if device is not None and device_map is not None:
         raise AudioFitContractError("device and device_map are mutually exclusive")
-    profile = get_model_profile(key)
-    processor = load_audio_processor(key)
+    processor = load_audio_processor(profile)
     text_tokenizer = transformers.AutoTokenizer.from_pretrained(
         profile.model_id, revision=profile.model_revision
     )

@@ -2,7 +2,7 @@
 
 Generic waveform, corpus, resume, checkpoint, and lens validation live here.
 Model-specific processor framing and prepared decoder replay live in
-``audiolens.models``.
+``audiolens.models.gemma4``.
 """
 
 from __future__ import annotations

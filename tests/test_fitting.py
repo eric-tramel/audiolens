@@ -15,9 +15,9 @@ from audiolens.fitting import (
     validate_lens,
     validate_runtime_lens_file,
 )
-from audiolens.models import (
-    DEFAULT_MODEL_PROFILE,
-    AudioFitContractError,
+from audiolens.models import DEFAULT_MODEL_PROFILE
+from audiolens.models.base import AudioFitContractError
+from audiolens.models.gemma4 import (
     GemmaPreparedAudioLensModel,
     crop_attention_mapping,
     expand_batch,

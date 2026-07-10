@@ -5,8 +5,9 @@ from dataclasses import replace
 import pytest
 import torch
 
-from audiolens.fitting import AudioFitContractError, config_digest
-from audiolens.models import DEFAULT_MODEL_PROFILE, PreparedAudio
+from audiolens.fitting import config_digest
+from audiolens.models import DEFAULT_MODEL_PROFILE
+from audiolens.models.base import AudioFitContractError, PreparedAudio
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent.parent / "scripts"))
 

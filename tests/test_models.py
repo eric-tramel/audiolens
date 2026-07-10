@@ -12,14 +12,19 @@ from audiolens import models
 from audiolens.models import (
     DEFAULT_MODEL_KEY,
     DEFAULT_MODEL_PROFILE,
-    AudioFitContractError,
-    GemmaPreparedAudioLensModel,
-    PreparedAudio,
-    UnknownModelProfileError,
-    audio_residuals,
     get_model_profile,
     load_audio_processor,
     load_model_runtime,
+)
+from audiolens.models import base, gemma4
+from audiolens.models.base import (
+    AudioFitContractError,
+    PreparedAudio,
+    UnknownModelProfileError,
+    audio_residuals,
+)
+from audiolens.models.gemma4 import (
+    GemmaPreparedAudioLensModel,
     prepare_audio,
 )
 
@@ -75,6 +80,16 @@ def test_profile_lookup_imports_no_ml_runtime_dependencies():
     )
     subprocess.run([sys.executable, "-c", code], check=True)
 
+def test_models_package_separates_base_and_gemma_family_features():
+    assert models.ModelProfile is base.ModelProfile
+    assert models.PreparedAudio is base.PreparedAudio
+    assert models.GEMMA4_PROFILE is gemma4.GEMMA4_PROFILE
+    assert gemma4.GEMMA4_PROFILE.adapter_source == (
+        "audiolens.models.gemma4:GemmaAudioRuntime"
+    )
+    assert base.ModelProfile.__module__ == "audiolens.models.base"
+    assert gemma4.GemmaAudioRuntime.__module__ == "audiolens.models.gemma4"
+
 
 def test_unknown_profile_fails_closed_without_value_error():
     assert not issubclass(UnknownModelProfileError, ValueError)
@@ -85,7 +100,7 @@ def test_unknown_profile_fails_closed_without_value_error():
 def test_malformed_audio_token_id_is_non_skippable_contract_failure():
     config = types.SimpleNamespace(audio_token_id="not-an-integer")
     with pytest.raises(AudioFitContractError, match="not an integer") as caught:
-        models.resolve_audio_token_id(config, _Tokenizer())
+        gemma4.resolve_audio_token_id(config, _Tokenizer())
     assert not isinstance(caught.value, ValueError)
 
 
@@ -158,9 +173,9 @@ def test_runtime_loader_uses_qualified_recipe_and_pinned_identity(monkeypatch):
         AutoModelForImageTextToText=AutoModel,
     )
     monkeypatch.setitem(sys.modules, "transformers", fake_transformers)
-    monkeypatch.setattr(models, "load_audio_processor", lambda key: processor)
+    monkeypatch.setattr(gemma4, "load_audio_processor", lambda profile: processor)
     monkeypatch.setattr(
-        models,
+        gemma4,
         "GemmaAudioRuntime",
         lambda profile, actual_processor, model, text_tokenizer: types.SimpleNamespace(
             profile=profile,

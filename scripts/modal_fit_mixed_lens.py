@@ -49,7 +49,9 @@ def _source_digest() -> str:
         "pyproject.toml",
         "uv.lock",
         "src/audiolens/fitting.py",
-        "src/audiolens/models.py",
+        "src/audiolens/models/__init__.py",
+        "src/audiolens/models/base.py",
+        "src/audiolens/models/gemma4.py",
         "scripts/modal_fit_mixed_lens.py",
     )
     if all((REPO_ROOT / relative).is_file() for relative in relatives):
