@@ -12,21 +12,20 @@ from __future__ import annotations
 
 import sys
 
-import transformers
-
 from audiolens import (
-    MODEL_ID,
     anchor_fingerprint,
     load_anchors,
     load_default_anchors,
     variant_token_ids,
 )
+from audiolens.models import get_model_profile, load_audio_processor
 
 
 def main() -> None:
+    profile = get_model_profile()
     path = sys.argv[1] if len(sys.argv) > 1 else None
     anchors, colors = load_anchors(path) if path else load_default_anchors()
-    tok = transformers.AutoProcessor.from_pretrained(MODEL_ID).tokenizer
+    tok = load_audio_processor(profile.key).tokenizer
 
     print(f"anchors: {path or 'packaged multilingual'}  fingerprint: {anchor_fingerprint(anchors)}")
     total_ids = 0

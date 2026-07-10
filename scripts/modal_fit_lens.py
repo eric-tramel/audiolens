@@ -281,16 +281,10 @@ def _build_fit_config(
     source_identity: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """Build the complete immutable identity before allocating the model."""
-    from audiolens.fitting import (
-        FIT_DIM_BATCH,
-        FIT_MAX_SEQ_LEN,
-        FIT_SKIP_FIRST,
-        FIT_SOURCE_LAYERS,
-        FIT_TARGET_LAYER,
-        JLENS_REVISION,
-        MODEL_REVISION,
-        WIKITEXT_REVISION,
-    )
+    from audiolens.fitting import JLENS_REVISION, MODEL_REVISION, WIKITEXT_REVISION
+    from audiolens.models import DEFAULT_MODEL_PROFILE
+
+    profile = DEFAULT_MODEL_PROFILE
 
     if requested_count != len(prompts):
         raise ValueError(
@@ -329,11 +323,11 @@ def _build_fit_config(
             "chat_template": False,
         },
         "fit": {
-            "source_layers": FIT_SOURCE_LAYERS,
-            "target_layer": FIT_TARGET_LAYER,
-            "skip_first": FIT_SKIP_FIRST,
-            "max_seq_len": FIT_MAX_SEQ_LEN,
-            "dim_batch": FIT_DIM_BATCH,
+            "source_layers": list(profile.source_layers),
+            "target_layer": profile.target_layer,
+            "skip_first": profile.skip_first,
+            "max_seq_len": profile.max_sequence_length,
+            "dim_batch": profile.dimension_batch_size,
             "checkpoint_every": CHECKPOINT_EVERY,
             "resume": True,
             "compile": False,
@@ -558,16 +552,20 @@ def _stability_diagnostics(
 
 
 def _atomic_save_runtime_lens(lens, path: pathlib.Path, expected_count: int, d_model: int) -> None:
+    from dataclasses import replace
+
     import torch
 
     from audiolens.fitting import validate_runtime_lens_file
+    from audiolens.models import DEFAULT_MODEL_PROFILE
 
+    profile = replace(DEFAULT_MODEL_PROFILE, d_model=d_model)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f"{path.name}.tmp.{os.getpid()}")
     lens.save(str(tmp), dtype=torch.float16)
-    validate_runtime_lens_file(tmp, expected_count, d_model=d_model)
+    validate_runtime_lens_file(tmp, expected_count, profile=profile)
     os.replace(tmp, path)
-    validate_runtime_lens_file(path, expected_count, d_model=d_model)
+    validate_runtime_lens_file(path, expected_count, profile=profile)
 
 
 def _checkpoint_manifest_metadata(
@@ -626,15 +624,13 @@ def _validate_pinned_fit_config(config: Mapping[str, Any]) -> None:
     """Reject self-consistent manifests that do not describe this recipe."""
     from audiolens.fitting import (
         AudioFitContractError,
-        FIT_DIM_BATCH,
-        FIT_MAX_SEQ_LEN,
-        FIT_SKIP_FIRST,
-        FIT_SOURCE_LAYERS,
-        FIT_TARGET_LAYER,
         JLENS_REVISION,
         MODEL_REVISION,
         WIKITEXT_REVISION,
     )
+    from audiolens.models import DEFAULT_MODEL_PROFILE
+
+    profile = DEFAULT_MODEL_PROFILE
 
     expected = {
         "schema_version",
@@ -692,11 +688,11 @@ def _validate_pinned_fit_config(config: Mapping[str, Any]) -> None:
     }:
         raise AudioFitContractError("fit raw-text/BOS policy is not pinned")
     if config.get("fit") != {
-        "source_layers": FIT_SOURCE_LAYERS,
-        "target_layer": FIT_TARGET_LAYER,
-        "skip_first": FIT_SKIP_FIRST,
-        "max_seq_len": FIT_MAX_SEQ_LEN,
-        "dim_batch": FIT_DIM_BATCH,
+        "source_layers": list(profile.source_layers),
+        "target_layer": profile.target_layer,
+        "skip_first": profile.skip_first,
+        "max_seq_len": profile.max_sequence_length,
+        "dim_batch": profile.dimension_batch_size,
         "checkpoint_every": CHECKPOINT_EVERY,
         "resume": True,
         "compile": False,
@@ -741,6 +737,9 @@ def _validate_completed_manifest(
         sha256_file,
         validate_runtime_lens_file,
     )
+    from dataclasses import replace
+
+    from audiolens.models import DEFAULT_MODEL_PROFILE
 
     config = record.get("config")
     if not isinstance(config, dict):
@@ -776,11 +775,11 @@ def _validate_completed_manifest(
             raise AudioFitContractError(
                 "lens metadata does not match its bound artifact"
             )
-        validate_runtime_lens_file(
-            lens_path,
-            requested,
+        profile = replace(
+            DEFAULT_MODEL_PROFILE,
             d_model=config["fit"]["d_model"],
         )
+        validate_runtime_lens_file(lens_path, requested, profile=profile)
         if sha256_file(lens_path) != lens["sha256"]:
             raise AudioFitContractError("lens SHA-256 changed during validation")
     except AudioFitContractError:

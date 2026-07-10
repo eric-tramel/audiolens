@@ -1,5 +1,6 @@
 import copy
 import importlib.util
+from dataclasses import replace
 import json
 import pathlib
 
@@ -8,20 +9,42 @@ import torch
 
 
 from audiolens.fitting import (
-    AudioFitContractError,
     LIBRISPEECH_REVISION,
     audit_manifest_rows,
     canonical_json_bytes,
     config_digest,
-    crop_attention_mapping,
-    expand_batch,
-    paired_resume_prefix,
-    PreparedAudioLensModel,
     lens_from_fit_checkpoint,
-    validate_audio_layout,
+    paired_resume_prefix,
     validate_lens,
     validate_runtime_lens_file,
 )
+from audiolens.models import DEFAULT_MODEL_PROFILE
+from audiolens.models.base import AudioFitContractError
+from audiolens.models.gemma4 import (
+    GemmaPreparedAudioLensModel,
+    crop_attention_mapping,
+    expand_batch,
+    validate_audio_layout,
+)
+
+
+def _tiny_profile():
+    return replace(
+        DEFAULT_MODEL_PROFILE,
+        key="fake-audio",
+        slug="fake-audio",
+        model_id="test/fake-audio",
+        model_revision="fake-revision",
+        adapter_source="tests:FakeAudioRuntime",
+        d_model=2,
+        source_layers=(1, 3),
+        target_layer=4,
+        max_sequence_length=80,
+        skip_first=1,
+        dimension_batch_size=2,
+        read_layer=3,
+        read_layers=(1, 3),
+    )
 
 _FIT_SCRIPT = pathlib.Path(__file__).parents[1] / "scripts" / "modal_fit_lens.py"
 _FIT_SPEC = importlib.util.spec_from_file_location("modal_fit_lens", _FIT_SCRIPT)
@@ -128,7 +151,7 @@ def test_crop_attention_mapping_and_expand_batch():
 
 
 def test_adapter_rejects_forward_before_encode():
-    adapter = object.__new__(PreparedAudioLensModel)
+    adapter = object.__new__(GemmaPreparedAudioLensModel)
     adapter._prepared = None
     with pytest.raises(AudioFitContractError, match="before encode"):
         adapter.forward(torch.ones(1, 2, dtype=torch.long))
@@ -187,58 +210,117 @@ def test_manifest_audit_rejects_drift(mutation):
         audit_manifest_rows(rows)
 
 
+def test_manifest_audit_uses_profile_sequence_geometry():
+    rows = _manifest_rows()
+    profile = replace(_tiny_profile(), max_sequence_length=79)
+    with pytest.raises(AudioFitContractError, match="max sequence length 79"):
+        audit_manifest_rows(rows, profile=profile)
+
+
 def test_fit_checkpoint_reconstructs_exact_fp32_mean(tmp_path):
+    profile = _tiny_profile()
     checkpoint = tmp_path / "fit.pt"
-    jacobian_sum = {layer: torch.eye(2) * 4 for layer in range(34)}
+    jacobian_sum = {layer: torch.eye(2) * 4 for layer in profile.source_layers}
     torch.save(
         {
             "jacobian_sum": jacobian_sum,
             "n_done": 4,
             "next_idx": 4,
-            "source_layers": list(range(34)),
-            "target_layer": 34,
-            "skip_first": 16,
+            "source_layers": list(profile.source_layers),
+            "target_layer": profile.target_layer,
+            "skip_first": profile.skip_first,
         },
         checkpoint,
     )
-    lens = lens_from_fit_checkpoint(checkpoint, 4)
-    validate_lens(lens, 4, d_model=2)
-    assert torch.equal(lens.jacobians[29], torch.eye(2))
+    lens = lens_from_fit_checkpoint(checkpoint, 4, profile=profile)
+    validate_lens(lens, 4, profile=profile)
+    assert torch.equal(lens.jacobians[3], torch.eye(2))
 
 
 def test_fit_checkpoint_rejects_wrong_resume_count(tmp_path):
+    profile = _tiny_profile()
     checkpoint = tmp_path / "fit.pt"
     torch.save(
         {
-            "jacobian_sum": {layer: torch.eye(2) for layer in range(34)},
+            "jacobian_sum": {
+                layer: torch.eye(profile.d_model) for layer in profile.source_layers
+            },
             "n_done": 3,
             "next_idx": 4,
-            "source_layers": list(range(34)),
-            "target_layer": 34,
-            "skip_first": 16,
+            "source_layers": list(profile.source_layers),
+            "target_layer": profile.target_layer,
+            "skip_first": profile.skip_first,
         },
         checkpoint,
     )
     with pytest.raises(AudioFitContractError, match="counts"):
-        lens_from_fit_checkpoint(checkpoint, 4)
+        lens_from_fit_checkpoint(checkpoint, 4, profile=profile)
+
+
+@pytest.mark.parametrize("mutation", ["target", "width", "layers"])
+def test_fit_checkpoint_rejects_profile_geometry_mismatch(tmp_path, mutation):
+    profile = _tiny_profile()
+    state = {
+        "jacobian_sum": {
+            layer: torch.eye(profile.d_model) for layer in profile.source_layers
+        },
+        "n_done": 4,
+        "next_idx": 4,
+        "source_layers": list(profile.source_layers),
+        "target_layer": profile.target_layer,
+        "skip_first": profile.skip_first,
+    }
+    if mutation == "target":
+        state["target_layer"] = profile.target_layer + 1
+    elif mutation == "width":
+        state["jacobian_sum"][profile.source_layers[0]] = torch.eye(
+            profile.d_model + 1
+        )
+    else:
+        state["source_layers"] = [0, *profile.source_layers[1:]]
+    checkpoint = tmp_path / "mismatched-fit.pt"
+    torch.save(state, checkpoint)
+    with pytest.raises(AudioFitContractError):
+        lens_from_fit_checkpoint(checkpoint, 4, profile=profile)
 
 
 def test_runtime_lens_file_requires_fp16(tmp_path):
     import jlens
 
+    profile = _tiny_profile()
     lens = jlens.JacobianLens(
-        jacobians={layer: torch.eye(2) for layer in range(34)},
+        jacobians={layer: torch.eye(2) for layer in profile.source_layers},
         n_prompts=4,
-        d_model=2,
+        d_model=profile.d_model,
     )
     path = tmp_path / "runtime.pt"
     lens.save(path)
-    validate_runtime_lens_file(path, 4, d_model=2)
+    validate_runtime_lens_file(path, 4, profile=profile)
     state = torch.load(path, weights_only=True)
     state["J"] = {layer: value.float() for layer, value in state["J"].items()}
     torch.save(state, path)
     with pytest.raises(AudioFitContractError, match="not serialized as fp16"):
-        validate_runtime_lens_file(path, 4, d_model=2)
+        validate_runtime_lens_file(path, 4, profile=profile)
+
+
+def test_validate_lens_rejects_alternate_profile_layers_and_width():
+    import jlens
+
+    profile = _tiny_profile()
+    wrong_layers = jlens.JacobianLens(
+        jacobians={0: torch.eye(2), 3: torch.eye(2)},
+        n_prompts=4,
+        d_model=2,
+    )
+    with pytest.raises(AudioFitContractError, match="layers/d_model"):
+        validate_lens(wrong_layers, 4, profile=profile)
+    wrong_width = jlens.JacobianLens(
+        jacobians={layer: torch.eye(3) for layer in profile.source_layers},
+        n_prompts=4,
+        d_model=3,
+    )
+    with pytest.raises(AudioFitContractError, match="layers/d_model"):
+        validate_lens(wrong_width, 4, profile=profile)
 
 
 def test_synthetic_prompt_weighted_merge_is_exact():

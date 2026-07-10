@@ -6,9 +6,17 @@ level.
 """
 
 from __future__ import annotations
+from .models import (
+    DEFAULT_MODEL_KEY,
+    get_model_profile,
+    load_model_runtime,
+    resolve_audio_token_id as _resolve_audio_token_id,
+)
 
-MODEL_ID = "google/gemma-4-E2B-it"
-READ_LAYER = 29  # readout resolves late on gemma-4-E2B (see scripts/sanity_check.py)
+_DEFAULT_MODEL_PROFILE = get_model_profile(DEFAULT_MODEL_KEY)
+
+MODEL_ID = _DEFAULT_MODEL_PROFILE.model_id
+READ_LAYER = _DEFAULT_MODEL_PROFILE.read_layer
 
 # Mood anchors from jlens-mood (vendored to avoid a cross-project dep;
 # sync manually if the clusters change).
@@ -199,36 +207,20 @@ def anchor_token_ids(
 
 def resolve_audio_token_id(config, tok) -> int:
     """The audio soft-token id marking audio positions in the prefill."""
-    audio_id = getattr(config, "audio_token_id", None)
-    if audio_id is None:
-        audio_id = tok.convert_tokens_to_ids("<audio_soft_token>")
-    if audio_id is None or audio_id == tok.unk_token_id:
-        raise RuntimeError("could not resolve the audio soft-token id")
-    return audio_id
+    return _resolve_audio_token_id(config, tok)
 
 
 def load_lensed_model(lens_path: str, *, device: str | None = None):
-    """Load the audio model + processor + fitted lens as one bundle.
+    """Load the canonical audio model, processor, JLens view, and fitted lens.
 
-    Returns ``(processor, hf, lens_model, lens)``: the raw HF model (for the
-    multimodal forward) and the jlens wrapper (``.layers`` for hooks,
-    ``.unembed``). One loading recipe for the scripts here and downstream
-    consumers (moodmic).
+    The public signature and ``(processor, hf, lens_model, lens)`` tuple remain
+    unchanged while model construction delegates to the pinned runtime adapter.
     """
-    import torch
-    import transformers
-
     import jlens
 
-    if device is None:
-        device = "mps" if torch.backends.mps.is_available() else "cpu"
-    processor = transformers.AutoProcessor.from_pretrained(MODEL_ID)
-    hf = transformers.AutoModelForImageTextToText.from_pretrained(
-        MODEL_ID, dtype=torch.bfloat16  # matches the fit dtype
-    ).to(device).eval()
-    lens_model = jlens.from_hf(hf, processor.tokenizer)
+    runtime = load_model_runtime(DEFAULT_MODEL_KEY, device=device)
     lens = jlens.JacobianLens.from_pretrained(lens_path)
-    return processor, hf, lens_model, lens
+    return runtime.processor, runtime.model, runtime.text_lens_model, lens
 
 
 def mood_readout_per_position(lens_logits, anchor_ids: dict[str, list[int]]):
