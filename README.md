@@ -84,16 +84,16 @@ workspace-like for this model and lens.
 
 ### Observed canonical result
 
-The source-bound run from commit `291ceb3` completed all 1,000 prompts:
+The source-bound run from commit `1798a21` completed all 1,000 prompts:
 
-- fit config `65b0c4cb649f77f44a27f665af3a6593fe8dbdd8b5a585b2ff8c2454faaab538`;
+- fit config `527a832964d8c952d6d8f69e5dfcd5d599c02d4703865bf97c31ea5e93cdf7ae`;
 - fp16 lens SHA-256
-  `ed4c229dc02168878aa40467a5d8cfd6b5a84c5fe976ef0a3d75684456cc0afe`;
+  `d70b506928da17596376b248890d70b642bf37c0bb58fc0fcb22897f51bc27c7`;
 - evaluation config
-  `cc6bfe99a6590a89df042089938543bf610e6fa629cb6414c0784a4f49971c10`;
+  `42d1bf037a64f86c0d249cc38c03b8eaf9d790bd48cea6bcedc3ad90868642e8`;
   and
 - report SHA-256
-  `844c64900290b9613bb882ea8aee2cdcd4ab754957ad78fa77aa481295cfc786`.
+  `09978e63328a03518cdd9f585f91afb5465faf0731246fbb128bdcf68ed3a769`.
 
 The preregistered result is **`no_band`**. Eight of nine criteria passed, but
 the candidate-minus-logit AUC was negative on the poetry distribution
@@ -106,7 +106,7 @@ failed per-distribution gate. No alternate band was searched.
 A separate transfer-only smoke applied this exact lens across L0-L33 and all
 audio positions in two fixed RAVDESS clips (83 and 82 positions). Its complete
 layer-by-position top-token record is retained on `audiolens-vol` as
-`eval/gemma-4-E2B-it-audio-transfer-b180368ab22959a0b01452c9ac9aae1b14bf182a813b9fcdd05550b48daeeba9.json`.
+`eval/gemma-4-E2B-it-audio-transfer-cbb2b2c45a5a2abe125d20ce1aafe384d715d97e2df114685e35b86c701091ec.json`.
 It demonstrates that the corrected text lens executes on real audio
 residuals; it is not a workspace-band, mood, or artifact-promotion result.
 
