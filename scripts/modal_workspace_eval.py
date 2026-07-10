@@ -2809,4 +2809,3 @@ def evaluate_workspace(fit_manifest: str, lens: str) -> str:
 @_modal_local_entrypoint
 def main(fit_manifest: str, lens: str):
     print(evaluate_workspace.remote(fit_manifest=fit_manifest, lens=lens))
-
