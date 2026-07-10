@@ -179,6 +179,32 @@ def test_evaluator_module_is_deployable_locally_and_bundle_import_safe(
     assert callable(inspector_namespace["load_completed_workspace_report"])
 
 
+@pytest.mark.parametrize(
+    "relative",
+    [
+        "src/audiolens/__init__.py",
+        "src/audiolens/models/__init__.py",
+        "src/audiolens/models/base.py",
+        "src/audiolens/models/gemma4.py",
+    ],
+)
+def test_evaluator_source_digests_track_model_profile_sources(
+    tmp_path,
+    monkeypatch,
+    relative,
+):
+    for source in workspace.WORKSPACE_SOURCE_RELATIVES:
+        path = tmp_path / source
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(source, encoding="utf-8")
+    monkeypatch.setattr(workspace, "REPO_ROOT", tmp_path)
+    fit_before = workspace._fit_source_digest()
+    workspace_before = workspace._source_digest()
+    (tmp_path / relative).write_text(f"changed:{relative}", encoding="utf-8")
+    assert workspace._fit_source_digest() != fit_before
+    assert workspace._source_digest() != workspace_before
+
+
 def test_frozen_fixture_constants_are_complete_and_nonplaceholder():
     assert [fixture.publication_count for fixture in workspace.FIXTURES] == [
         50,

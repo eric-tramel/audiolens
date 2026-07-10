@@ -60,13 +60,20 @@ def _git_revision() -> str:
         raise RuntimeError("cannot determine source Git revision") from None
 
 
+FIT_SOURCE_RELATIVES = (
+    "pyproject.toml",
+    "uv.lock",
+    "src/audiolens/__init__.py",
+    "src/audiolens/fitting.py",
+    "src/audiolens/models/__init__.py",
+    "src/audiolens/models/base.py",
+    "src/audiolens/models/gemma4.py",
+    "scripts/modal_fit_lens.py",
+)
+
+
 def _source_digest() -> str:
-    relatives = (
-        "pyproject.toml",
-        "uv.lock",
-        "src/audiolens/fitting.py",
-        "scripts/modal_fit_lens.py",
-    )
+    relatives = FIT_SOURCE_RELATIVES
     if all((REPO_ROOT / relative).is_file() for relative in relatives):
         digest = hashlib.sha256()
         for relative in relatives:
@@ -95,12 +102,8 @@ SOURCE_DIGEST = _source_digest()
 LOCK_SHA256 = _lock_digest()
 
 _HAS_LOCAL_PROJECT = all(
-    path.is_file()
-    for path in (
-        REPO_ROOT / "pyproject.toml",
-        REPO_ROOT / "uv.lock",
-        REPO_ROOT / "src" / "audiolens" / "__init__.py",
-    )
+    (REPO_ROOT / relative).is_file()
+    for relative in FIT_SOURCE_RELATIVES
 )
 
 if _HAS_LOCAL_PROJECT:

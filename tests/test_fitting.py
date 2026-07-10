@@ -95,6 +95,30 @@ def test_fit_manifest_loader_imports_without_modal_project_tree(
     assert mounted.commits == 1
 
 
+@pytest.mark.parametrize(
+    "relative",
+    [
+        "src/audiolens/__init__.py",
+        "src/audiolens/models/__init__.py",
+        "src/audiolens/models/base.py",
+        "src/audiolens/models/gemma4.py",
+    ],
+)
+def test_fit_source_digest_tracks_model_profile_sources(
+    tmp_path,
+    monkeypatch,
+    relative,
+):
+    for source in canonical_fit.FIT_SOURCE_RELATIVES:
+        path = tmp_path / source
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(source, encoding="utf-8")
+    monkeypatch.setattr(canonical_fit, "REPO_ROOT", tmp_path)
+    before = canonical_fit._source_digest()
+    (tmp_path / relative).write_text(f"changed:{relative}", encoding="utf-8")
+    assert canonical_fit._source_digest() != before
+
+
 def test_canonical_config_digest_is_stable_but_order_sensitive():
     a = {"model": "gemma", "prompts": ["a", "b"]}
     assert canonical_json_bytes(a) == canonical_json_bytes(

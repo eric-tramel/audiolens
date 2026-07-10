@@ -218,14 +218,24 @@ def _git_revision() -> str:
         raise RuntimeError("cannot determine source Git revision") from None
 
 
+FIT_SOURCE_RELATIVES = (
+    "pyproject.toml",
+    "uv.lock",
+    "src/audiolens/__init__.py",
+    "src/audiolens/fitting.py",
+    "src/audiolens/models/__init__.py",
+    "src/audiolens/models/base.py",
+    "src/audiolens/models/gemma4.py",
+    "scripts/modal_fit_lens.py",
+)
+WORKSPACE_SOURCE_RELATIVES = (
+    *FIT_SOURCE_RELATIVES,
+    "scripts/modal_workspace_eval.py",
+)
+
+
 def _source_digest() -> str:
-    relatives = (
-        "pyproject.toml",
-        "uv.lock",
-        "src/audiolens/fitting.py",
-        "scripts/modal_fit_lens.py",
-        "scripts/modal_workspace_eval.py",
-    )
+    relatives = WORKSPACE_SOURCE_RELATIVES
     if all((REPO_ROOT / relative).is_file() for relative in relatives):
         digest = hashlib.sha256()
         for relative in relatives:
@@ -239,12 +249,7 @@ def _source_digest() -> str:
 
 def _fit_source_digest() -> str:
     """Identity needed when importing the fit validator in a Modal image."""
-    relatives = (
-        "pyproject.toml",
-        "uv.lock",
-        "src/audiolens/fitting.py",
-        "scripts/modal_fit_lens.py",
-    )
+    relatives = FIT_SOURCE_RELATIVES
     if all((REPO_ROOT / relative).is_file() for relative in relatives):
         digest = hashlib.sha256()
         for relative in relatives:
@@ -272,13 +277,7 @@ def _lock_digest() -> str:
 
 _HAS_LOCAL_PROJECT = all(
     (REPO_ROOT / relative).is_file()
-    for relative in (
-        "pyproject.toml",
-        "uv.lock",
-        "src/audiolens/fitting.py",
-        "scripts/modal_fit_lens.py",
-        "scripts/modal_workspace_eval.py",
-    )
+    for relative in WORKSPACE_SOURCE_RELATIVES
 )
 _DEPLOYMENT_ENABLED = (
     _HAS_LOCAL_PROJECT
