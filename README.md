@@ -82,6 +82,34 @@ The report ends in either `validated` or `no_band`; both are complete outcomes.
 Only `validated` supports the narrow claim that this fixed range is
 workspace-like for this model and lens.
 
+### Observed canonical result
+
+The source-bound run from commit `291ceb3` completed all 1,000 prompts:
+
+- fit config `65b0c4cb649f77f44a27f665af3a6593fe8dbdd8b5a585b2ff8c2454faaab538`;
+- fp16 lens SHA-256
+  `ed4c229dc02168878aa40467a5d8cfd6b5a84c5fe976ef0a3d75684456cc0afe`;
+- evaluation config
+  `cc6bfe99a6590a89df042089938543bf610e6fa629cb6414c0784a4f49971c10`;
+  and
+- report SHA-256
+  `844c64900290b9613bb882ea8aee2cdcd4ab754957ad78fa77aa481295cfc786`.
+
+The preregistered result is **`no_band`**. Eight of nine criteria passed, but
+the candidate-minus-logit AUC was negative on the poetry distribution
+(`-0.02016`), violating the requirement that every distribution be
+nonnegative. The equal-distribution candidate-band AUC was `0.50648` versus
+`0.27278` for the logit lens, and the paired-bootstrap lower 95% bound for
+their difference was `0.20521`; those aggregate results do not override the
+failed per-distribution gate. No alternate band was searched.
+
+A separate transfer-only smoke applied this exact lens across L0-L33 and all
+audio positions in two fixed RAVDESS clips (83 and 82 positions). Its complete
+layer-by-position top-token record is retained on `audiolens-vol` as
+`eval/gemma-4-E2B-it-audio-transfer-b180368ab22959a0b01452c9ac9aae1b14bf182a813b9fcdd05550b48daeeba9.json`.
+It demonstrates that the corrected text lens executes on real audio
+residuals; it is not a workspace-band, mood, or artifact-promotion result.
+
 This does **not** compute a formal J-space component. The report defines
 J-space components as sparse nonnegative combinations of J-lens vectors, but
 neither Anthropic's released package nor Neuronpedia's public J-lens serving
