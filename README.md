@@ -84,16 +84,16 @@ workspace-like for this model and lens.
 
 ### Observed canonical result
 
-The source-bound run from commit `1798a21` completed all 1,000 prompts:
+The fully source-bound run from commit `eafe7cc` completed all 1,000 prompts:
 
-- fit config `527a832964d8c952d6d8f69e5dfcd5d599c02d4703865bf97c31ea5e93cdf7ae`;
+- fit config `7464e4104cde5f7d12110ed8b8f4fa90b0819edd92096a2e1bc8b8d826294568`;
 - fp16 lens SHA-256
-  `d70b506928da17596376b248890d70b642bf37c0bb58fc0fcb22897f51bc27c7`;
+  `a0b0e6fb29c1eaf5c3d02e05a591e08cc9d43ef916020c5fcdb76c325b08529c`;
 - evaluation config
-  `42d1bf037a64f86c0d249cc38c03b8eaf9d790bd48cea6bcedc3ad90868642e8`;
+  `6284af5fa0f5ae5753cbc8831e3cfed7be111412824dc16a1c4218f70fca393a`;
   and
 - report SHA-256
-  `09978e63328a03518cdd9f585f91afb5465faf0731246fbb128bdcf68ed3a769`.
+  `16413a02d95aeada2e7a36a70fe100cc61c1d7138620ae0fdd1f0fdcd4791028`.
 
 The preregistered result is **`no_band`**. Eight of nine criteria passed, but
 the candidate-minus-logit AUC was negative on the poetry distribution
@@ -103,10 +103,11 @@ nonnegative. The equal-distribution candidate-band AUC was `0.50648` versus
 their difference was `0.20521`; those aggregate results do not override the
 failed per-distribution gate. No alternate band was searched.
 
-A separate transfer-only smoke applied this exact lens across L0-L33 and all
-audio positions in two fixed RAVDESS clips (83 and 82 positions). Its complete
-layer-by-position top-token record is retained on `audiolens-vol` as
-`eval/gemma-4-E2B-it-audio-transfer-cbb2b2c45a5a2abe125d20ce1aafe384d715d97e2df114685e35b86c701091ec.json`.
+A separate transfer-only smoke applied this exact lens on a Modal H100 across
+L0-L33 and all audio positions in two fixed RAVDESS clips (83 and 82
+positions). Its complete layer-by-position top-token record is retained on
+`audiolens-vol` as
+`eval/gemma-4-E2B-it-audio-transfer-196110a9f3b8533da8c68febcf1962b48b6ac5a7ece8a397f3bff8a088a2cceb.json`.
 It demonstrates that the corrected text lens executes on real audio
 residuals; it is not a workspace-band, mood, or artifact-promotion result.
 
