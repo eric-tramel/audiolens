@@ -1,6 +1,6 @@
 """Optional paired RAVDESS evaluation for text400 and mixed528 lenses.
 
-Both lenses read the same captured residuals from one Gemma forward per clip.
+Both lenses read the same captured residuals from one model forward per clip.
 RAVDESS is downloaded directly from Zenodo, remains held out from training,
 and is never bundled with Audiolens code or published lens artifacts.
 """
@@ -16,13 +16,23 @@ import modal
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 VOL_MOUNT = "/vol"
-MODEL_ID = "google/gemma-4-E2B-it"
 RAVDESS_URL = "https://zenodo.org/records/1188976/files/Audio_Speech_Actors_01-24.zip?download=1"
 RAVDESS_SHA256 = "5d208e01632cc3e5242106fa2af3273e6dc5239fb8143131979ac74c4aa40657"
 RAVDESS_N_CLIPS = 1440
-READ_LAYERS = [23, 29, 33]
 TOPK = 10
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
+
+
+def _evaluation_profile_config(profile) -> dict[str, object]:
+    """Content-addressed execution identity contributed by a model profile."""
+    return {
+        "profile_key": profile.key,
+        "profile_version": profile.version,
+        "profile_slug": profile.slug,
+        "adapter_source": profile.adapter_source,
+        "model": {"id": profile.model_id, "revision": profile.model_revision},
+        "read_layers": list(profile.read_layers),
+    }
 
 
 def _source_digest() -> str:
@@ -31,6 +41,9 @@ def _source_digest() -> str:
         "src/audiolens/data/multilingual.yaml",
         "src/audiolens/__init__.py",
         "src/audiolens/fitting.py",
+        "src/audiolens/models/__init__.py",
+        "src/audiolens/models/base.py",
+        "src/audiolens/models/gemma4.py",
         "scripts/modal_audio_eval.py",
         "scripts/analyze_audio_eval.py",
     )
@@ -185,7 +198,6 @@ def run_eval(baseline_lens: str, candidate_lens: str, limit: int = 0) -> str:
     import os
 
     import torch
-    import transformers
 
     import jlens
     from jlens.hooks import ActivationRecorder
@@ -197,10 +209,9 @@ def run_eval(baseline_lens: str, candidate_lens: str, limit: int = 0) -> str:
         load_default_anchors,
         mood_readout,
         parse_ravdess_name,
-        resolve_audio_token_id,
     )
+    from audiolens.models import audio_residuals, get_model_profile, load_model_runtime
     from audiolens.fitting import (
-        MODEL_REVISION,
         atomic_write_json,
         config_digest,
         paired_resume_prefix,
@@ -213,12 +224,14 @@ def run_eval(baseline_lens: str, candidate_lens: str, limit: int = 0) -> str:
     if len(clips) != RAVDESS_N_CLIPS:
         raise RuntimeError(f"staged RAVDESS has {len(clips)}, expected {RAVDESS_N_CLIPS}")
 
+    profile = get_model_profile()
+    read_layers = list(profile.read_layers)
     anchor_words, _anchor_colors = load_default_anchors()
     if "curiosity" in anchor_words:
         raise RuntimeError("production evaluation anchors unexpectedly include curiosity")
     config = {
         "schema_version": SCHEMA_VERSION,
-        "model": {"id": MODEL_ID, "revision": MODEL_REVISION},
+        **_evaluation_profile_config(profile),
         "runtime": {
             "torch": importlib.metadata.version("torch"),
             "transformers": importlib.metadata.version("transformers"),
@@ -234,7 +247,6 @@ def run_eval(baseline_lens: str, candidate_lens: str, limit: int = 0) -> str:
         "attention_implementation": "eager",
         "ravdess_sha256": RAVDESS_SHA256,
         "n_clips": RAVDESS_N_CLIPS,
-        "read_layers": READ_LAYERS,
         "topk": TOPK,
         "lenses": {
             "text400": {"path": baseline_lens, "sha256": sha256_file(baseline_lens)},
@@ -280,51 +292,40 @@ def run_eval(baseline_lens: str, candidate_lens: str, limit: int = 0) -> str:
             vol.commit()
         return f"{results_path}: already complete ({len(done)} clips)"
 
-    processor = transformers.AutoProcessor.from_pretrained(
-        MODEL_ID, revision=MODEL_REVISION
-    )
-    tokenizer = processor.tokenizer
-    hf = transformers.AutoModelForImageTextToText.from_pretrained(
-        MODEL_ID,
-        revision=MODEL_REVISION,
-        dtype=torch.bfloat16,
-        device_map="cuda",
-        attn_implementation="eager",
-    ).eval()
-    model = jlens.from_hf(hf, tokenizer, force_bos=False)
+    runtime = load_model_runtime(profile.key, device_map="cuda")
+    tokenizer = runtime.tokenizer
     lenses = {
         "text400": jlens.JacobianLens.load(baseline_lens),
         "mixed528": jlens.JacobianLens.load(candidate_lens),
     }
-    validate_lens(lenses["text400"], 400)
-    validate_lens(lenses["mixed528"], 528)
+    validate_lens(lenses["text400"], 400, profile=profile)
+    validate_lens(lenses["mixed528"], 528, profile=profile)
     anchors = anchor_token_ids(tokenizer, anchor_words)
-    audio_id = resolve_audio_token_id(hf.config, tokenizer)
 
     with open(results_path, "a", encoding="utf-8") as output:
         for index, wav in enumerate(todo):
-            messages = [{"role": "user", "content": [{"type": "audio", "audio": str(wav)}]}]
-            inputs = processor.apply_chat_template(
-                messages, tokenize=True, return_dict=True, return_tensors="pt"
-            ).to("cuda")
-            positions = (inputs["input_ids"][0] == audio_id).nonzero(as_tuple=True)[0]
+            prepared = runtime.prepare_audio(wav)
+            positions = prepared.audio_positions
             if positions.numel() == 0:
                 raise RuntimeError(f"{wav.name}: no audio soft tokens")
-            with torch.no_grad(), ActivationRecorder(model.layers, at=READ_LAYERS) as recorder:
-                hf.model(**inputs, use_cache=False)
-
+            with torch.no_grad(), ActivationRecorder(
+                runtime.layers, at=read_layers
+            ) as recorder:
+                runtime.forward_audio(prepared)
             record = {
                 "clip": wav.name,
                 "meta": parse_ravdess_name(wav.stem),
                 "n_audio_tokens": int(positions.numel()),
-                "seq_len": int(inputs["input_ids"].shape[1]),
+                "seq_len": int(prepared.input_ids.shape[1]),
                 "readouts": {},
             }
             for label, lens in lenses.items():
                 layer_results = {}
-                for layer in READ_LAYERS:
-                    residual = recorder.activations[layer][0][positions].float()
-                    logits = model.unembed(lens.transport(residual, layer)).float()
+                for layer in read_layers:
+                    residual = audio_residuals(
+                        recorder.activations, prepared, layer
+                    ).float()
+                    logits = runtime.unembed(lens.transport(residual, layer)).float()
                     mass, top_ids = mood_readout(logits, anchors, topk=TOPK)
                     layer_results[str(layer)] = {
                         "anchor_mass": mass,
