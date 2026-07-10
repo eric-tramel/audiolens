@@ -1,8 +1,9 @@
 # audiolens
 
-Audiolens fits Jacobian lenses for audio-input language models on text and
-real audio soft-token inputs, then reads the model workspace over audio
-positions. The first target is `google/gemma-4-E2B-it`.
+Audiolens fits a context-general Jacobian lens for an audio-input language
+model, applies it to text or audio-token residuals, and keeps the resulting
+J-lens readout distinct from downstream mood/prosody summaries. The first
+target is `google/gemma-4-E2B-it`.
 
 ## Fresh-clone setup
 
@@ -38,6 +39,54 @@ Audit it against the target tokenizer with:
 uv run python scripts/anchor_report.py
 ```
 
+## Canonical text J-lens and workspace-like evaluation
+
+The canonical lens follows Anthropic's released Jacobian estimator with one
+independent transport matrix per source layer. For each valid source position,
+it sums the effects on current and future valid targets, then takes the mean
+over valid source positions within each prompt and an equal mean over
+successful prompts. It fits exactly 1,000
+raw-text, 128-token sequences using Neuronpedia's reproducible WikiText-103
+concatenation and rechunking recipe. The fit is text-only by design: broad
+context averaging estimates a general disposition to verbalize, while the same
+decoder-space lens can later be applied at audio positions.
+
+Run the full canonical fit:
+
+```bash
+uv run modal run scripts/modal_fit_lens.py
+```
+
+The command prints content-addressed manifest and lens paths on
+`audiolens-vol`, plus exact `modal volume get` commands. A lower
+`--n-prompts` value is available for integration smoke tests, but those
+artifacts are explicitly noncanonical.
+
+Evaluate the completed 1,000-prompt artifact with the six prompt distributions
+released alongside Anthropic's technical report:
+
+```bash
+uv run modal run scripts/modal_workspace_eval.py \
+  --fit-manifest /vol/runs/<fit-manifest>.json \
+  --lens /vol/lenses/<lens>.pt
+modal volume get audiolens-vol eval/<workspace-report>.json eval/
+uv run python scripts/sanity_check.py \
+  --report eval/<workspace-report>.json
+```
+
+The evaluator preserves every item, layer, and concept rank; compares the
+J-lens with logit-lens, transposed, permuted, and label-permutation controls;
+and tests the preregistered Gemma range L13-L31 against early L0-L12 and motor
+L32-L33 behavior. It never searches for a better band after seeing results.
+The report ends in either `validated` or `no_band`; both are complete outcomes.
+Only `validated` supports the narrow claim that this fixed range is
+workspace-like for this model and lens.
+
+This does **not** compute a formal J-space component. The report defines
+J-space components as sparse nonnegative combinations of J-lens vectors, but
+neither Anthropic's released package nor Neuronpedia's public J-lens serving
+path includes that gradient-pursuit decomposition.
+
 ## Mixed WikiText and LibriSpeech fit
 
 The reproducible mixed experiment refits the existing 400-prompt WikiText
@@ -69,7 +118,8 @@ uv run modal run scripts/modal_fit_mixed_lens.py
 
 The fit is content-addressed by ordered corpus hashes, exact model/data
 revisions, the frozen `uv.lock`, attention backend, code digest, and estimator
-settings. It never overwrites the generic text-only lens.
+settings. It remains a separate historical audio-local/mixed-corpus experiment
+and cannot select the canonical J-lens or its workspace-like layer range.
 
 ## Opt-in Hugging Face publication
 

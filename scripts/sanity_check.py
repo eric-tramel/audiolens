@@ -1,109 +1,112 @@
-"""Text-side sanity for the fitted gemma-4-E2B-it lens.
+"""Inspect a completed, content-addressed workspace-evaluation report.
 
-1. Top-k readout on probe prompts (should show the forward-looking
-   workspace behavior, e.g. currency tokens before "is").
-2. Correlation against Neuronpedia's base-model gemma-4-e2b lens on the
-   same prompts (instruct-vs-base lenses should agree strongly).
-3. Mood-anchor vetting on the Gemma tokenizer (single-token coverage).
-
-Run after downloading the fitted lens:
-    modal volume get audiolens-vol lenses/gemma-4-E2B-it_jacobian_lens.pt lenses/
-    uv run python scripts/sanity_check.py
+This command is deliberately a report reader, not a second evaluator.  It
+prints summaries already present in the validated report and never loads a
+model, lens tensor, benchmark fixture, or inferred sidecar.
 """
 
 from __future__ import annotations
 
 import argparse
+import os
+import pathlib
+import sys
+from typing import Any, Mapping
 
-import torch
-import transformers
+os.environ["AUDIOLENS_REPORT_INSPECTOR_ONLY"] = "1"
 
-import jlens
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
-from audiolens import EMOTION_ANCHORS, single_token_id
-from audiolens.fitting import MODEL_REVISION
+from modal_workspace_eval import load_completed_workspace_report  # noqa: E402
 
-MODEL_ID = "google/gemma-4-E2B-it"
-OUR_LENS = "lenses/gemma-4-E2B-it_jacobian_lens.pt"
-REF_REPO = "neuronpedia/jacobian-lens"
-REF_FILE = "gemma-4-e2b/jlens/Salesforce-wikitext/gemma-4-E2B_jacobian_lens.pt"
 
-PROBES = [
-    "Fact: The currency used in the country shaped like a boot is",
-    "The fridge had been unplugged for three weeks, and the smell hit us the moment the door opened.",
-]
+def render_workspace_report(report: Mapping[str, Any]) -> str:
+    """Render only validated, precomputed report fields."""
+    fit = report["fit_identity"]
+    eligibility = report["eligibility"]["distributions"]
+    summaries = report["summaries"]
+    aggregate = summaries["equal_distribution_aggregate"]["layer_sets"]
+    adjudication = report["adjudication"]
+    lines = [
+        "AudioLens canonical J-lens workspace evaluation",
+        f"status: {adjudication['status']}",
+        f"evaluation config: {report['evaluation_config_sha256']}",
+        f"report content: {report['workspace_report_sha256']}",
+        f"fit config: {fit['fit_config_sha256']}",
+        (
+            "lens: "
+            f"{fit['lens_relative_path']} sha256={fit['lens_sha256']} "
+            f"bytes={fit['lens_bytes']} dtype={fit['lens_dtype']} "
+            f"prompts={fit['lens_n_prompts']}"
+        ),
+        "fixtures / tokenizer eligibility:",
+    ]
+    for fixture in report["fixtures"]:
+        coverage = eligibility[fixture["slug"]]
+        lines.append(
+            "  "
+            f"{fixture['slug']}: source={fixture['publication_count']} "
+            f"eligible_items={coverage['eligible_items']} "
+            f"eligible_concepts={coverage['eligible_concepts']} "
+            f"fixture_sha256={fixture['sha256']} "
+            f"names_sha256={fixture['selected_name_sha256']}"
+        )
+    lines.append("all-distribution summaries:")
+    for slug in fixture_slugs(report):
+        layer_sets = summaries["distributions"][slug]["layer_sets"]
+        all_layers = layer_sets["all_l0_l33"]["variants"]
+        band = layer_sets["candidate_l13_l31"]["variants"]
+        lines.append(f"  {slug}:")
+        for label, values in (("all L0-L33", all_layers), ("band L13-L31", band)):
+            candidate = values["candidate"]
+            lines.append(
+                f"    {label}: candidate_auc={candidate['log_k_auc']:.6f} "
+                f"logit_auc={values['logit']['log_k_auc']:.6f} "
+                f"transposed_auc={values['transposed']['log_k_auc']:.6f} "
+                f"permuted_auc={values['permuted']['log_k_auc']:.6f} "
+                f"candidate_pass@k={candidate['pass_at_k']}"
+            )
+    lines.append("fixed equal-distribution region curves:")
+    for region in ("early_l0_l12", "candidate_l13_l31", "motor_l32_l33"):
+        region_summary = aggregate[region]
+        candidate = region_summary["variants"]["candidate"]
+        motor = region_summary["motor_metrics"]
+        lines.append(
+            f"  {region}: layers={region_summary['layers']} "
+            f"intermediate_auc={candidate['log_k_auc']:.6f} "
+            f"candidate_pass@k={candidate['pass_at_k']} "
+            "next_token_agreement@k="
+            f"{motor['next_token_agreement_at_k']['candidate']} "
+            f"j_logit_top1_agreement={motor['candidate_logit_top1_agreement']:.6f} "
+            f"j_logit_js_nats={motor['candidate_logit_js_nats']:.6f}"
+        )
+    failed = adjudication["failed_criteria"]
+    lines.append("failed criteria: " + (", ".join(failed) if failed else "none"))
+    lines.append(
+        "claim: "
+        + (
+            "fixed L13-L31 workspace-like transfer validated"
+            if adjudication["status"] == "validated"
+            else "no workspace-like band validated; canonical J-lens remains valid"
+        )
+    )
+    return "\n".join(lines)
+
+
+def fixture_slugs(report: Mapping[str, Any]) -> list[str]:
+    return [fixture["slug"] for fixture in report["fixtures"]]
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--lens", default=OUR_LENS, help="candidate lens path")
+    parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--baseline", default=OUR_LENS, help="text-only baseline lens path"
+        "--report",
+        required=True,
+        help="explicit completed workspace-evaluation JSON (bare .pt is rejected)",
     )
-    args = parser.parse_args()
-
-    device = "mps" if torch.backends.mps.is_available() else "cpu"
-    hf = transformers.AutoModelForImageTextToText.from_pretrained(
-        MODEL_ID,
-        revision=MODEL_REVISION,
-        dtype=torch.bfloat16,  # matches the fit dtype; fp32 E2B is ~20 GB
-        attn_implementation="eager",
-    ).to(device).eval()
-    tok = transformers.AutoTokenizer.from_pretrained(MODEL_ID, revision=MODEL_REVISION)
-    model = jlens.from_hf(hf, tok)
-
-    ours = jlens.JacobianLens.from_pretrained(args.lens)
-    baseline = jlens.JacobianLens.from_pretrained(args.baseline)
-    print(f"candidate lens: {ours}")
-    print(f"baseline lens:  {baseline}")
-    ref = jlens.JacobianLens.from_pretrained(REF_REPO, filename=REF_FILE)
-    print(f"ref lens: {ref}")
-
-    shared = sorted(
-        set(ours.source_layers) & set(baseline.source_layers) & set(ref.source_layers)
-    )
-    # Readout resolves late on gemma-4-E2B: L29/L33 show the currency cluster,
-    # mid layers are filler for both lenses (layer sweep, 2026-07-08).
-    late = shared[-5]
-
-    print(f"\n== top-k readout (our lens, L{late}) ==")
-    for probe in PROBES:
-        lens_logits, _, _ = ours.apply(model, probe, layers=[late])
-        top = lens_logits[late][-1].topk(6)
-        print(f"  ...{probe[-45:]!r}")
-        print("   -> " + ", ".join(tok.decode([i]) for i in top.indices.tolist()))
-
-    print("\n== candidate vs baseline / neuronpedia (lens-logit correlation) ==")
-    for probe in PROBES:
-        ours_logits, _, _ = ours.apply(model, probe, layers=[late])
-        baseline_logits, _, _ = baseline.apply(model, probe, layers=[late])
-        ref_logits, _, _ = ref.apply(model, probe, layers=[late])
-        a = ours_logits[late].flatten()
-        b = baseline_logits[late].flatten()
-        c = ref_logits[late].flatten()
-        baseline_r = torch.corrcoef(torch.stack([a, b]))[0, 1]
-        ref_r = torch.corrcoef(torch.stack([a, c]))[0, 1]
-        # top-10 overlap at the final position
-        ours_top = set(ours_logits[late][-1].topk(10).indices.tolist())
-        ref_top = set(ref_logits[late][-1].topk(10).indices.tolist())
-        print(
-            f"  baseline r={baseline_r:.3f}  ref r={ref_r:.3f}  "
-            f"ref top10 overlap {len(ours_top & ref_top)}/10  ...{probe[-40:]!r}"
-        )
-
-    print("\n== candidate vs baseline Jacobian change by layer ==")
-    for layer in shared:
-        candidate_j = ours.jacobians[layer].flatten()
-        baseline_j = baseline.jacobians[layer].flatten()
-        cosine = torch.nn.functional.cosine_similarity(candidate_j, baseline_j, dim=0)
-        relative_l2 = (candidate_j - baseline_j).norm() / baseline_j.norm()
-        print(f"  L{layer:02d} cosine={cosine:.6f}  relative_l2={relative_l2:.6f}")
-
-    print("\n== mood-anchor vetting on the Gemma tokenizer ==")
-    for emotion, words in EMOTION_ANCHORS.items():
-        dropped = [w for w in words if single_token_id(tok, w) is None]
-        status = f"{len(words) - len(dropped)}/{len(words)}"
-        print(f"  {emotion:<9} {status}" + (f"  dropped: {dropped}" if dropped else ""))
+    arguments = parser.parse_args()
+    report = load_completed_workspace_report(arguments.report)
+    print(render_workspace_report(report))
 
 
 if __name__ == "__main__":
