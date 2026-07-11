@@ -116,6 +116,93 @@ J-space components as sparse nonnegative combinations of J-lens vectors, but
 neither Anthropic's released package nor Neuronpedia's public J-lens serving
 path includes that gradient-pursuit decomposition.
 
+## Source-bound audio J-lens
+
+The canonical audio fit is a separate, waveform-only application of Anthropic's
+released estimator. It selects exactly 1,000 LibriSpeech utterances: 500 from
+`clean/train.360` and 500 from `other/train.500`, alternating strata in fit
+order with one 2–4 second, native-mono 16 kHz clip per globally unique speaker.
+Selection uses SHA-256 speaker and utterance ranks over the complete pinned
+metadata pool, not stream order. The exact source transcript is retained and
+hashed as pair provenance but is never passed to `jlens.fit`.
+
+Every accepted waveform is decoded, processed through Gemma's pinned
+audio-to-decoder path, and admitted only when its audio span is contiguous and
+has at least one stock-valid source position after `skip_first=16`. The fit then
+uses the same stock prompt-level estimator as the text lens: one independent
+fp32 running-sum matrix per L0–L33 source layer, target L34, and equal weight per
+successful waveform. No audio/text merge, semantic evaluator, layer-band
+selection, publication, or workspace claim is part of this run.
+
+Run the source, selection, restore, replay, smoke-resume, and full-fit gates in
+order:
+
+```bash
+uv run modal run scripts/modal_fit_audio_lens.py --rank-source-only
+uv run modal run scripts/modal_fit_audio_lens.py --stage-corpus-only \
+  --source-pool-sha256 <source-pool-sha256>
+uv run modal run scripts/modal_fit_audio_lens.py --selection-replay-only \
+  --source-pool-sha256 <source-pool-sha256> \
+  --ordered-corpus-sha256 <ordered-corpus-sha256>
+uv run modal run scripts/modal_fit_audio_lens.py --restore-source-only \
+  --ordered-corpus-sha256 <ordered-corpus-sha256>
+uv run modal run scripts/modal_fit_audio_lens.py --preflight-only \
+  --ordered-corpus-sha256 <ordered-corpus-sha256>
+uv run modal run scripts/modal_fit_audio_lens.py --replay-parity-only \
+  --ordered-corpus-sha256 <ordered-corpus-sha256>
+uv run modal run scripts/modal_fit_audio_lens.py --smoke-only \
+  --ordered-corpus-sha256 <ordered-corpus-sha256>
+uv run modal run scripts/modal_fit_audio_lens.py --fit \
+  --ordered-corpus-sha256 <ordered-corpus-sha256>
+```
+
+The selection replay, source restore, all-1,000 processor replay, two-row
+decoder replay, and separately persisted 10→20 resume each seal a
+content-addressed gate bound to the immutable fit configuration. The production
+fit will not allocate an H100 until all five gates validate. The full run
+preserves an immutable 500-example prefix snapshot and emits only two per-layer
+convergence diagnostics: identity-centered split-half cosine and
+first-half-to-full relative L2. The final fp16 lens is validated
+matrix-for-matrix against the 1,000-example fp32 running sums. Corpus, source
+pool, attempt ledger, checkpoint, gate, stability report, and lens identities
+are all content-bound in the completed run manifest on `audiolens-vol`.
+
+This contract is schema v2. It intentionally rejects partial or completed v1
+runs rather than reusing artifacts that predate checkpoint identity stamps and
+durable execution gates.
+
+### Observed source-bound audio fit
+
+The complete H100 run passed all five execution gates and fitted all 1,000
+waveforms:
+
+- source pool: 252,702 pinned LibriSpeech rows (104,014 clean, 148,688 other);
+- selected corpus: 500 clean + 500 other clips, 30,848 audited attempts,
+  ordered-corpus SHA-256
+  `1f194155b47db48726878c6026c507ca01b65d3e50736eab5dbea2c1bbc8c966`;
+- implementation source SHA-256:
+  `ccdb307a6ea9bf90aa1f8fae075dd9ec54b7ffb6c5738276cd896b6f96086c80`;
+- fit config:
+  `ee7cd4e42991fec5a00b4256ba466ff163ebd64fa22963334033066e7d531275`;
+- final fp32 checkpoint: `n_done=next_idx=1000`, SHA-256
+  `e764083944c3022b4c58f4ee58747691691cedab9c8fd2dd33f57e8006d8a724`;
+- validated fp16 lens: 160,439,813 bytes, SHA-256
+  `da0ccabf1ee14e4df060f97f31cf0132a0d3f6ed2cb45b6c77738693bc8f1aa9`;
+- stability report:
+  `b1ddd375af8029cc529ae5f6ab0e3ad7c9d2d179ef2097e8adff28791e27d6f7`.
+
+Across L0–L33, the median identity-centered split-half cosine was `0.999894`
+and the median first-half-to-full relative L2 was `0.02233`. The least stable
+direction was L3 (`0.989104` cosine); the largest relative change was L0
+(`0.08746`). Descriptively, first-half-to-full change decreased with depth:
+mean relative L2 was `0.05540` over L0–L12, `0.02085` over L13–L22, and
+`0.01243` over L23–L33.
+
+These measurements establish a reproducible audio-conditioned J-lens. The
+preregistered protocol does not define a convergence threshold, so these
+descriptive diagnostics do not by themselves establish convergence, identify
+a formal J-space component, or support a workspace-region claim.
+
 ## Mixed WikiText and LibriSpeech fit
 
 The reproducible mixed experiment refits the existing 400-prompt WikiText

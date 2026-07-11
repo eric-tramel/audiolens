@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from .base import (
     AudioFitContractError,
@@ -32,6 +32,7 @@ GEMMA4_PROFILE = ModelProfile(
     read_layers=(23, 29, 33),
 )
 
+
 def resolve_audio_token_id(config: Any, tokenizer: Any) -> int:
     """Resolve Gemma's audio soft-token ID from its pinned runtime contract."""
 
@@ -43,14 +44,8 @@ def resolve_audio_token_id(config: Any, tokenizer: Any) -> int:
         resolved = int(audio_id)
         unknown = None if unknown_id is None else int(unknown_id)
     except (TypeError, ValueError, OverflowError) as exc:
-        raise AudioFitContractError(
-            "audio soft-token id is not an integer"
-        ) from exc
-    if (
-        isinstance(audio_id, bool)
-        or resolved < 0
-        or (unknown is not None and resolved == unknown)
-    ):
+        raise AudioFitContractError("audio soft-token id is not an integer") from exc
+    if isinstance(audio_id, bool) or resolved < 0 or (unknown is not None and resolved == unknown):
         raise AudioFitContractError("could not resolve the audio soft-token id")
     return resolved
 
@@ -72,16 +67,13 @@ def validate_audio_layout(
     positions = (input_ids[0] == audio_id).nonzero(as_tuple=True)[0]
     if positions.numel() == 0:
         raise AudioFitContractError("no audio soft-token positions")
-    expected = torch.arange(
-        int(positions[0]), int(positions[-1]) + 1, device=positions.device
-    )
+    expected = torch.arange(int(positions[0]), int(positions[-1]) + 1, device=positions.device)
     if not torch.equal(positions, expected):
         raise AudioFitContractError("audio soft-token positions are not contiguous")
     stop = int(positions[-1]) + 1
     if stop > profile.max_sequence_length:
         raise AudioFitContractError(
-            f"audio prefix has {stop} positions, above "
-            f"max_length={profile.max_sequence_length}"
+            f"audio prefix has {stop} positions, above max_length={profile.max_sequence_length}"
         )
     try:
         valid = valid_position_mask(stop, skip_first=profile.skip_first)
@@ -111,12 +103,42 @@ def prepare_audio(
 
     import torch
 
-    messages = [
-        {"role": "user", "content": [{"type": "audio", "audio": str(path)}]}
-    ]
+    messages = [{"role": "user", "content": [{"type": "audio", "audio": str(path)}]}]
     inputs = processor.apply_chat_template(
         messages, tokenize=True, return_dict=True, return_tensors="pt"
     )
+    if not isinstance(inputs, Mapping):
+        raise AudioFitContractError("processor did not return a model-input mapping")
+    required_audio_inputs = ("input_features", "input_features_mask")
+    missing_audio_inputs = [name for name in required_audio_inputs if inputs.get(name) is None]
+    if missing_audio_inputs:
+        raise AudioFitContractError(
+            f"processor omitted required audio model inputs {missing_audio_inputs}"
+        )
+    for name in required_audio_inputs:
+        value = inputs[name]
+        if (
+            not torch.is_tensor(value)
+            or value.ndim < 2
+            or value.shape[0] != 1
+            or value.numel() == 0
+        ):
+            raise AudioFitContractError(f"processor {name} is not a nonempty batch-one Tensor")
+    if not bool(torch.isfinite(inputs["input_features"]).all()):
+        raise AudioFitContractError("processor input_features contain nonfinite values")
+    if not bool(inputs["input_features_mask"].bool().any()):
+        raise AudioFitContractError("processor input_features_mask selects no audio")
+    forbidden_inputs = (
+        "pixel_values",
+        "pixel_values_videos",
+        "image_grid_thw",
+        "video_grid_thw",
+    )
+    present_forbidden = [name for name in forbidden_inputs if inputs.get(name) is not None]
+    if present_forbidden:
+        raise AudioFitContractError(
+            f"audio-only processor returned image/video inputs {present_forbidden}"
+        )
     try:
         input_ids = inputs["input_ids"]
     except (KeyError, TypeError) as exc:
@@ -146,9 +168,7 @@ def prepare_audio(
     )
 
 
-def crop_attention_mapping(
-    mapping: dict[str, Any], stop: int
-) -> dict[str, Any]:
+def crop_attention_mapping(mapping: dict[str, Any], stop: int) -> dict[str, Any]:
     """Crop Gemma's exact eager full/sliding masks to a decoder prefix."""
 
     import torch
@@ -164,9 +184,7 @@ def crop_attention_mapping(
             cropped[name] = None
             continue
         if not torch.is_tensor(value) or value.ndim < 2:
-            raise AudioFitContractError(
-                f"{name} mask must be None or a Tensor with query/key axes"
-            )
+            raise AudioFitContractError(f"{name} mask must be None or a Tensor with query/key axes")
         if value.shape[-2] < stop or value.shape[-1] < stop:
             raise AudioFitContractError(
                 f"{name} mask {tuple(value.shape)} is shorter than stop={stop}"
