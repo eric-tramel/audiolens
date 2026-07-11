@@ -323,6 +323,14 @@ middle band, but nothing approaching a workspace-like readout, and the
 strictly-interpreted answer to the fixed-band hypothesis is no on both
 modalities.
 
+The independent validator reproduced the complete report — every physical
+artifact, re-derived normalized WAV, chain identity, statistic, criterion, and
+the report SHA-256 — from the sealed source on an H100-class container
+(`independently_reproduced: true`). Validation must run on the same compute
+class as the fit and evaluation because the bound fp64 stability
+recomputation follows the container's CPU thread topology; the small-CPU tier
+reproduces it only to within ulps, which the exact-float contract rejects.
+
 ## Mixed WikiText and LibriSpeech fit
 
 The reproducible mixed experiment refits the existing 400-prompt WikiText
