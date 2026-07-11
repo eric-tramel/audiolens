@@ -203,6 +203,58 @@ preregistered protocol does not define a convergence threshold, so these
 descriptive diagnostics do not by themselves establish convergence, identify
 a formal J-space component, or support a workspace-region claim.
 
+## Fixed-band synthetic-speech evaluation
+
+The audio evaluator attempts the same fixed L13–L31 hypothesis and frozen
+publication-item concepts as the canonical text evaluator, without selecting a
+new range after seeing audio results. It renders two pinned eSpeak 1.52.0 voices
+for each of 259 eligible items (518 observations), calibrates one shortest
+multilingual prompt per supported language with pinned
+`openai/whisper-large-v3-turbo`, and only then permits the final audio lens to
+score every L0–L33 layer. The final report is atomic: failed calibration or
+scoring publishes no partial confirmatory scores.
+This 259-item surface supersedes the initial 260-item feasibility target.
+`multilingual/filipino-opposite-up` is excluded because eSpeak 1.52.0 has no
+Filipino/Tagalog voice; `multilingual/irish-opposite-big` is excluded because
+the pinned Whisper model rejects its `ga` language code. Both exclusions were
+made before the source-final preregistration was sealed and before any
+confirmatory scoring; neither was selected from lens results or calibration
+error rates.
+
+Run the nonconfirmatory smoke, seal the stimuli and calibration, and request the
+confirmatory evaluation:
+
+```bash
+uv run modal run scripts/modal_audio_workspace_eval.py --smoke
+uv run modal run scripts/modal_audio_workspace_eval.py --preregister
+uv run modal run scripts/modal_audio_workspace_eval.py --evaluate \
+  --preregistration /vol/audio-workspace-eval/preregistrations/<sha256>.json \
+  --sha256 <sha256>
+```
+
+### Observed synthetic-stimulus result
+
+The real H100 smoke completed both sacrificial observations across every
+position, layer, candidate readout, and control. Its content-addressed report is
+`audio-workspace-eval/smoke/3738d5e7d2e712cd4635f606ed59397359c589e817e44b3f865431c08cc1ac91.json`
+on `audiolens-vol`.
+
+The sealed full preregistration uses evaluator source SHA-256
+`189dbf36fafa17994ced984aedddb5d000077601cb91a1e4ec20d6e4589b9e59`
+and is retained as
+`audio-workspace-eval/preregistrations/d2f0a3d82f10a3c5f18450d86290f2ce18fd724ed919bbde74211cf63cc0576a.json`.
+Independent ASR calibration failed before the lens was loaded: macro character
+error rate was `0.51363` against the preregistered maximum `0.35`, maximum cell
+error was `2.52941` against `0.80`, and 13 of 68 cells exceeded the cell limit.
+The failures covered Bengali, Hindi, Japanese, Korean, Russian, Serbian, and
+Ukrainian stimuli. The evaluator therefore rejected the confirmatory request
+with `confirmatory evaluation requires passed calibration` and emitted no
+fixed-band comparison report. The scientifically valid result is
+`inconclusive_synthetic_stimulus`: these eSpeak renderings are not sufficiently
+intelligible to test whether the source-bound audio J-lens recovers the frozen
+intermediate labels, so they provide neither positive nor negative evidence for
+an audio workspace-like band.
+
 ## Mixed WikiText and LibriSpeech fit
 
 The reproducible mixed experiment refits the existing 400-prompt WikiText
