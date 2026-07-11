@@ -395,20 +395,6 @@ def _modal_gpu_function(*, timeout: int):
     return decorate
 
 
-def _modal_cpu_function(*, timeout: int):
-    def decorate(function):
-        if app is None or vol is None:
-            return function
-        return app.function(
-            cpu=4.0,
-            memory=32_768,
-            timeout=timeout,
-            volumes={VOL_MOUNT: vol},
-        )(function)
-
-    return decorate
-
-
 def _modal_local_entrypoint(function):
     if app is None:
         return function
@@ -2534,7 +2520,12 @@ def evaluate_experiment(preregistration: str, sha256: str) -> str:
     return json.dumps(_evaluate_impl(preregistration, sha256), sort_keys=True)
 
 
-@_modal_cpu_function(timeout=6 * 60 * 60)
+# The validator must run on the same H100-class containers as the fit and the
+# evaluation: the bound stability recomputation reduces fp64 chunks with
+# torch.dot, whose within-chunk summation order follows the container's CPU
+# thread topology, and the exact-float reproduction fails by ulps on the
+# small-CPU tier.
+@_modal_gpu_function(timeout=6 * 60 * 60)
 def validate_report_experiment(report: str, sha256: str) -> str:
     return json.dumps(_validate_report_impl(report, sha256), sort_keys=True)
 
