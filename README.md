@@ -290,6 +290,39 @@ intelligible to test whether the source-bound audio J-lens recovers the frozen
 intermediate labels, so they provide neither positive nor negative evidence for
 an audio workspace-like band.
 
+### Observed confirmatory result (OpenAI stimuli)
+
+The sealed OpenAI-stimulus run completed the full confirmatory pipeline for
+the first time. The sealed recipe is
+`74c784de9259c05fda62a0ae4ba46fe18db2a9180d366a8264cc3d4f70f609cb`, the passed
+calibration measured macro CER `0.03721` with maximum cell CER `0.52941`, the
+sealed preregistration is
+`audio-workspace-eval/preregistrations/95ff8518df9a09aa68a32a0044f60d146dfd820eb704f49ee7efb530822942ba.json`,
+and the complete 518-record report is
+`audio-workspace-eval/reports/4f928675c3b3e34a835da6af9d6a4e4bbc1ddd9b6bc172392285aa13fb4526e5.json`.
+
+The verdict is **`no_fixed_band_synthetic_speech_readout`**: a complete,
+score-bearing outcome, not a stimulus failure. At the last audio position the
+candidate L13–L31 transport shows a real but very small semantic advantage
+over the logit baseline: equal-distribution AUC `0.00323` versus `0.00095`,
+point delta `+0.00228` with paired-bootstrap lower 95% bound `+0.00136`,
+positive in all five distributions and both voices, and above the transposed,
+permuted, and early controls with confident bounds. That effect fails the
+preregistered magnitude and confirmation gates: the required point delta is
+`0.02` (observed is roughly ten times smaller), the max-stat label p-value is
+`0.01470` against the `0.01` limit, the candidate band does not beat the motor
+band (`-0.00608`, upper bound below zero), and no response-position criterion
+passes (label p `0.99960`). On the same 259 items the canonical text transport
+delta is `+0.0603` (`0.13125` versus `0.07092`) — roughly forty times the
+audio content-position AUC level — and the canonical text verdict remains
+`no_band`, unchanged.
+
+The honest summary: with these synthetic-speech inputs, the audio-conditioned
+lens carries a detectable trace of the target concepts through the fixed
+middle band, but nothing approaching a workspace-like readout, and the
+strictly-interpreted answer to the fixed-band hypothesis is no on both
+modalities.
+
 ## Mixed WikiText and LibriSpeech fit
 
 The reproducible mixed experiment refits the existing 400-prompt WikiText
