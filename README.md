@@ -209,7 +209,7 @@ The audio evaluator attempts the same fixed L13–L31 hypothesis and frozen
 publication-item concepts as the canonical text evaluator, without selecting a
 new range after seeing audio results. It speaks each of 259 eligible items in
 two voices (518 observations), calibrates one shortest non-number multilingual
-prompt per supported language with pinned `openai/whisper-large-v3-turbo`, and
+prompt per supported language with pinned `openai/whisper-large-v3`, and
 only then permits the final audio lens to score every L0–L33 layer. The final
 report is atomic: failed calibration or scoring publishes no partial
 confirmatory scores. This 259-item surface supersedes the initial 260-item
@@ -239,6 +239,17 @@ removed from the spoken input only; scripts, references, and CER normalization
 are unchanged by this because calibration normalization already strips
 punctuation. Calibration CER additionally maps Serbian Cyrillic to Gaj Latin
 before comparison, because the pinned ASR emits Serbian in Latin script.
+
+The calibration ASR is pinned to the full `openai/whisper-large-v3`. An
+initial attempt with `whisper-large-v3-turbo` terminated
+`inconclusive_synthetic_stimulus` on exactly one cell (`bn` at CER 12.88,
+a token repetition loop; macro CER 0.2376 passed), and a ten-render probe
+showed the distilled model loops or romanizes short Bengali regardless of
+render, so that failure measured the calibration model rather than the
+stimuli. Under the full model no probe render loops; the Bengali `onyx`
+render was pre-screened to one that decodes in Bengali script before the
+recipe was sealed, and the sealed calibration remains the binding gate with
+unchanged thresholds.
 
 Synthesize and upload the sealed stimuli, run the nonconfirmatory smoke, seal
 the preregistration, and request the confirmatory evaluation:

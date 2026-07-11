@@ -30,8 +30,8 @@ MODEL_GPU = "H100"
 
 MODEL_ID = "google/gemma-4-E2B-it"
 MODEL_REVISION = "70af34e20bd4b7a91f0de6b22675850c43922a03"
-WHISPER_ID = "openai/whisper-large-v3-turbo"
-WHISPER_REVISION = "41f01f3fe87f28c78e2fbf8b568835947dd65ed9"
+WHISPER_ID = "openai/whisper-large-v3"
+WHISPER_REVISION = "06f233fe06e710322aca913c1bc4249a0d71fce1"
 JLENS_REVISION = "581d398613e5602a5af361e1c34d3a92ea82ba8e"
 
 TTS_ENGINE = "openai-tts"
