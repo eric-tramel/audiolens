@@ -207,32 +207,56 @@ a formal J-space component, or support a workspace-region claim.
 
 The audio evaluator attempts the same fixed L13–L31 hypothesis and frozen
 publication-item concepts as the canonical text evaluator, without selecting a
-new range after seeing audio results. It renders two pinned eSpeak 1.52.0 voices
-for each of 259 eligible items (518 observations), calibrates one shortest
-multilingual prompt per supported language with pinned
-`openai/whisper-large-v3-turbo`, and only then permits the final audio lens to
-score every L0–L33 layer. The final report is atomic: failed calibration or
-scoring publishes no partial confirmatory scores.
-This 259-item surface supersedes the initial 260-item feasibility target.
-`multilingual/filipino-opposite-up` is excluded because eSpeak 1.52.0 has no
-Filipino/Tagalog voice; `multilingual/irish-opposite-big` is excluded because
-the pinned Whisper model rejects its `ga` language code. Both exclusions were
-made before the source-final preregistration was sealed and before any
-confirmatory scoring; neither was selected from lens results or calibration
-error rates.
+new range after seeing audio results. It speaks each of 259 eligible items in
+two voices (518 observations), calibrates one shortest non-number multilingual
+prompt per supported language with pinned `openai/whisper-large-v3-turbo`, and
+only then permits the final audio lens to score every L0–L33 layer. The final
+report is atomic: failed calibration or scoring publishes no partial
+confirmatory scores. This 259-item surface supersedes the initial 260-item
+feasibility target. `multilingual/filipino-opposite-up` and
+`multilingual/irish-opposite-big` remain excluded; both exclusions predate the
+first sealed preregistration and are retained so the item surface stays
+identical across stimulus-engine attempts. Neither was selected from lens
+results or calibration error rates.
 
-Run the nonconfirmatory smoke, seal the stimuli and calibration, and request the
-confirmatory evaluation:
+### Stimulus engines
+
+The first stimulus attempt rendered the scripts with a pinned, source-built
+eSpeak NG 1.52.0. Its independent ASR calibration failed (see below), so the
+protocol's `inconclusive_synthetic_stimulus` terminal state applied and no
+audio scores exist for that engine.
+
+The current stimulus engine is OpenAI `gpt-4o-mini-tts` over two voices
+(`onyx`, `nova`). API generation is not reproducible from pinned weights, so
+provenance is bound to sealed bytes instead: `scripts/synthesize_audio_stimuli.py`
+synthesizes every script once locally, rewrites each response into a canonical
+mono 24 kHz PCM16 RIFF container, hashes every file, and seals the set under a
+content-addressed recipe. Modal staging verifies each byte against the recipe
+before deterministic 24 kHz → 16 kHz normalization, and report validation
+independently re-derives every normalized WAV from the sealed source bytes.
+Dangling prompt quotes (which have no spoken form and silence the engine) are
+removed from the spoken input only; scripts, references, and CER normalization
+are unchanged by this because calibration normalization already strips
+punctuation. Calibration CER additionally maps Serbian Cyrillic to Gaj Latin
+before comparison, because the pinned ASR emits Serbian in Latin script.
+
+Synthesize and upload the sealed stimuli, run the nonconfirmatory smoke, seal
+the preregistration, and request the confirmatory evaluation:
 
 ```bash
-uv run modal run scripts/modal_audio_workspace_eval.py --smoke
-uv run modal run scripts/modal_audio_workspace_eval.py --preregister
+uv run python scripts/synthesize_audio_stimuli.py --output stimuli-build
+uv run modal volume put audiolens-vol stimuli-build/<recipe-sha256> \
+  audio-workspace-eval/source-stimuli/<recipe-sha256>
+uv run modal run scripts/modal_audio_workspace_eval.py --smoke \
+  --tts-recipe <recipe-sha256>
+uv run modal run scripts/modal_audio_workspace_eval.py --preregister \
+  --tts-recipe <recipe-sha256>
 uv run modal run scripts/modal_audio_workspace_eval.py --evaluate \
   --preregistration /vol/audio-workspace-eval/preregistrations/<sha256>.json \
   --sha256 <sha256>
 ```
 
-### Observed synthetic-stimulus result
+### Observed synthetic-stimulus result (eSpeak attempt)
 
 The real H100 smoke completed both sacrificial observations across every
 position, layer, candidate readout, and control. Its content-addressed report is
@@ -249,8 +273,8 @@ error was `2.52941` against `0.80`, and 13 of 68 cells exceeded the cell limit.
 The failures covered Bengali, Hindi, Japanese, Korean, Russian, Serbian, and
 Ukrainian stimuli. The evaluator therefore rejected the confirmatory request
 with `confirmatory evaluation requires passed calibration` and emitted no
-fixed-band comparison report. The scientifically valid result is
-`inconclusive_synthetic_stimulus`: these eSpeak renderings are not sufficiently
+fixed-band comparison report. The scientifically valid result for that engine is
+`inconclusive_synthetic_stimulus`: the eSpeak renderings are not sufficiently
 intelligible to test whether the source-bound audio J-lens recovers the frozen
 intermediate labels, so they provide neither positive nor negative evidence for
 an audio workspace-like band.

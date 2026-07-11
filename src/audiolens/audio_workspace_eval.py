@@ -53,16 +53,17 @@ AUDIO_FIT_CONFIG_SHA256 = "ee7cd4e42991fec5a00b4256ba466ff163ebd64fa229633340330
 AUDIO_LENS_SHA256 = "da0ccabf1ee14e4df060f97f31cf0132a0d3f6ed2cb45b6c77738693bc8f1aa9"
 CONTROL_OUTPUT_BASIS_SHA256 = "57b908355f62e17de36979d52d3b7a60bc7556ed3f87e95b6a2928f29c083b2d"
 
-ESPEAK_VERSION = "1.52.0"
-ESPEAK_SOURCE_URL = "https://github.com/espeak-ng/espeak-ng/archive/refs/tags/1.52.0.tar.gz"
-ESPEAK_SOURCE_SHA256 = "bb4338102ff3b49a81423da8a1a158b420124b055b60fa76cfb4b18677130a23"
-TTS_VARIANTS = ("m1", "f1")
-TTS_ARGV_PREFIX = ("espeak-ng", "-s", "180", "-p", "50", "-a", "100", "-g", "10", "-v")
-TTS_ARGV_SUFFIX = ("--stdout",)
-TTS_SAMPLE_RATE = 22_050
+TTS_ENGINE = "openai-tts"
+TTS_ENDPOINT = "https://api.openai.com/v1/audio/speech"
+TTS_MODEL = "gpt-4o-mini-tts"
+TTS_RESPONSE_FORMAT = "wav"
+TTS_INPUT_POLICY = "strip_double_quotes_collapse_whitespace"
+TTS_SYNTHESIS_POLICY = "sealed_source_bytes_nonreproducible_generation"
+TTS_VARIANTS = ("onyx", "nova")
+TTS_SAMPLE_RATE = 24_000
 NORMALIZED_SAMPLE_RATE = 16_000
-RESAMPLE_UP = 320
-RESAMPLE_DOWN = 441
+RESAMPLE_UP = 2
+RESAMPLE_DOWN = 3
 AUDIO_POSITION = "last_processor_valid_audio_position"
 RESPONSE_POSITION = "response_position"
 POSITIONS = (AUDIO_POSITION, RESPONSE_POSITION)
@@ -110,7 +111,7 @@ CALIBRATION_CELL_CER_MAX = 0.80
 JS_DIVERGENCE_MAX_NATS = math.log(2.0)
 JS_DIVERGENCE_TOLERANCE = 1e-6
 
-LANGUAGE_TO_ESPEAK = {
+LANGUAGE_CODES = {
     "arabic": "ar",
     "bengali": "bn",
     "bulgarian": "bg",
@@ -764,9 +765,9 @@ def language_for_coordinate(distribution: str, name: str) -> str:
         return "en-us"
     language = name.split("-", 1)[0]
     try:
-        return LANGUAGE_TO_ESPEAK[language]
+        return LANGUAGE_CODES[language]
     except KeyError as exc:
-        raise AudioWorkspaceEvalContractError(f"no frozen eSpeak language for {name}") from exc
+        raise AudioWorkspaceEvalContractError(f"no frozen language code for {name}") from exc
 
 
 def spoken_script(distribution: str, item: Mapping[str, Any]) -> str:
@@ -824,13 +825,20 @@ def build_spoken_items(selected_items: Sequence[Mapping[str, Any]]) -> list[dict
     return result
 
 
-def tts_argv(language: str, variant: str, script: str) -> list[str]:
-    if variant not in TTS_VARIANTS or not isinstance(script, str) or not script:
-        raise AudioWorkspaceEvalContractError("invalid TTS variant or script")
-    valid_languages = {"en-us", *LANGUAGE_TO_ESPEAK.values()}
-    if language not in valid_languages:
-        raise AudioWorkspaceEvalContractError("language is not in the frozen eSpeak mapping")
-    return [*TTS_ARGV_PREFIX, f"{language}+{variant}", *TTS_ARGV_SUFFIX, script]
+def tts_input(script: str) -> str:
+    """Spoken synthesis input: dangling prompt quotes are removed.
+
+    The publication prompts end in an opening double quote that has no spoken
+    form and silences the pinned synthesis engine. CER normalization already
+    discards punctuation, so removing quotes never changes a calibration
+    reference.
+    """
+    if not isinstance(script, str) or not script:
+        raise AudioWorkspaceEvalContractError("TTS script must be a nonempty string")
+    cleaned = " ".join(script.replace('"', " ").split())
+    if not cleaned:
+        raise AudioWorkspaceEvalContractError("TTS input is empty after quote removal")
+    return cleaned
 
 
 def normalize_transcript(value: str) -> str:
@@ -844,11 +852,58 @@ def normalize_transcript(value: str) -> str:
     return " ".join(normalized.split())
 
 
-def character_error_rate(reference: str, hypothesis: str) -> float:
-    left = normalize_transcript(reference)
-    right = normalize_transcript(hypothesis)
-    if not left:
-        raise AudioWorkspaceEvalContractError("CER reference is empty after normalization")
+# Vuk-Gaj digraphic correspondence over casefolded text. Serbian is written in
+# both scripts; the pinned ASR prefers Latin while the publication scripts are
+# Cyrillic, so calibration compares both sides in the Latin form.
+SERBIAN_CYRILLIC_TO_LATIN = {
+    "а": "a",
+    "б": "b",
+    "в": "v",
+    "г": "g",
+    "д": "d",
+    "ђ": "đ",
+    "е": "e",
+    "ж": "ž",
+    "з": "z",
+    "и": "i",
+    "ј": "j",
+    "к": "k",
+    "л": "l",
+    "љ": "lj",
+    "м": "m",
+    "н": "n",
+    "њ": "nj",
+    "о": "o",
+    "п": "p",
+    "р": "r",
+    "с": "s",
+    "т": "t",
+    "ћ": "ć",
+    "у": "u",
+    "ф": "f",
+    "х": "h",
+    "ц": "c",
+    "ч": "č",
+    "џ": "dž",
+    "ш": "š",
+}
+
+
+def transliterate_serbian(value: str) -> str:
+    if not isinstance(value, str):
+        raise AudioWorkspaceEvalContractError("transliteration input must be text")
+    return "".join(SERBIAN_CYRILLIC_TO_LATIN.get(char, char) for char in value)
+
+
+def normalize_transcript_for_language(value: str, language: str) -> str:
+    """Frozen calibration normalization; Serbian maps to its Latin script."""
+    normalized = normalize_transcript(value)
+    if language == "sr":
+        normalized = transliterate_serbian(normalized)
+    return normalized
+
+
+def _levenshtein(left: str, right: str) -> int:
     previous = list(range(len(right) + 1))
     for row_index, left_char in enumerate(left, 1):
         current = [row_index]
@@ -861,7 +916,15 @@ def character_error_rate(reference: str, hypothesis: str) -> float:
                 )
             )
         previous = current
-    return previous[-1] / len(left)
+    return previous[-1]
+
+
+def character_error_rate(reference: str, hypothesis: str, language: str = "") -> float:
+    left = normalize_transcript_for_language(reference, language)
+    right = normalize_transcript_for_language(hypothesis, language)
+    if not left:
+        raise AudioWorkspaceEvalContractError("CER reference is empty after normalization")
+    return _levenshtein(left, right) / len(left)
 
 
 def calibration_status(cers: Sequence[float]) -> dict[str, Any]:
@@ -893,12 +956,17 @@ def calibration_coordinates(spoken_items: Sequence[Mapping[str, Any]]) -> list[d
     by_language: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
     for item in multilingual:
         by_language[str(item.get("language"))].append(item)
-    if set(by_language) != set(LANGUAGE_TO_ESPEAK.values()):
-        raise AudioWorkspaceEvalContractError("calibration does not cover the exact 35 languages")
+    if set(by_language) != set(LANGUAGE_CODES.values()):
+        raise AudioWorkspaceEvalContractError("calibration does not cover the exact 34 languages")
     cells = []
-    for language in LANGUAGE_TO_ESPEAK.values():
+    for language in LANGUAGE_CODES.values():
+        # Number prompts invite digit-vs-word ASR spellings that measure the
+        # metric rather than intelligibility, so non-number items are
+        # preferred whenever the language offers one.
+        pool = by_language[language]
+        non_number = [item for item in pool if "-number-" not in str(item["name"])]
         shortest = min(
-            by_language[language],
+            non_number or pool,
             key=lambda item: (len(str(item["script"])), int(item["coordinate_index"])),
         )
         for variant in TTS_VARIANTS:
@@ -1022,14 +1090,14 @@ def frozen_protocol() -> dict[str, Any]:
             "excluded_coordinates": [list(value) for value in EXCLUDED_COORDINATES],
         },
         "tts": {
-            "engine": "espeak-ng",
-            "version": ESPEAK_VERSION,
-            "source_url": ESPEAK_SOURCE_URL,
-            "source_sha256": ESPEAK_SOURCE_SHA256,
-            "argv_prefix": list(TTS_ARGV_PREFIX),
-            "argv_suffix": list(TTS_ARGV_SUFFIX),
+            "engine": TTS_ENGINE,
+            "endpoint": TTS_ENDPOINT,
+            "model": TTS_MODEL,
+            "response_format": TTS_RESPONSE_FORMAT,
+            "input_policy": TTS_INPUT_POLICY,
+            "synthesis_policy": TTS_SYNTHESIS_POLICY,
             "variants": list(TTS_VARIANTS),
-            "language_mapping": dict(LANGUAGE_TO_ESPEAK),
+            "language_mapping": dict(LANGUAGE_CODES),
             "non_multilingual_language": "en-us",
             "variants_are_same_engine_robustness_checks": True,
         },
@@ -1047,9 +1115,9 @@ def frozen_protocol() -> dict[str, Any]:
         "calibration": {
             "model": WHISPER_MODEL_ID,
             "revision": WHISPER_REVISION,
-            "selection": "shortest_script_by_unicode_codepoints_then_coordinate_index_per_multilingual_language",
+            "selection": "shortest_non_number_script_by_unicode_codepoints_then_coordinate_index_per_multilingual_language",
             "decoding": {"do_sample": False, "num_beams": 1},
-            "normalization": "unicode_nfkc_casefold_remove_unicode_punctuation_collapse_whitespace",
+            "normalization": "unicode_nfkc_casefold_remove_unicode_punctuation_collapse_whitespace_serbian_cyrillic_to_gaj_latin",
             "cells": EXPECTED_CALIBRATION_CELL_COUNT,
             "macro_cer_max": CALIBRATION_MACRO_CER_MAX,
             "cell_cer_max": CALIBRATION_CELL_CER_MAX,
@@ -2682,8 +2750,7 @@ def build_stimulus_manifest(
     items: Sequence[Mapping[str, Any]],
     observations: Sequence[Mapping[str, Any]],
     overlap_audit: Mapping[str, Any],
-    espeak_binary_sha256: str,
-    espeak_voices_sha256: str,
+    tts_recipe_sha256: str,
     source_identity: Mapping[str, Any],
     runtime_identity: Mapping[str, Any],
 ) -> dict[str, Any]:
@@ -2696,8 +2763,7 @@ def build_stimulus_manifest(
         "items": list(items),
         "observations": list(observations),
         "overlap_audit": dict(overlap_audit),
-        "espeak_binary_sha256": espeak_binary_sha256,
-        "espeak_voices_sha256": espeak_voices_sha256,
+        "tts_recipe_sha256": tts_recipe_sha256,
         "source_identity": dict(source_identity),
         "runtime_identity": dict(runtime_identity),
     }
@@ -2722,8 +2788,7 @@ def validate_stimulus_manifest(
             "items",
             "observations",
             "overlap_audit",
-            "espeak_binary_sha256",
-            "espeak_voices_sha256",
+            "tts_recipe_sha256",
             "source_identity",
             "runtime_identity",
             "stimulus_manifest_sha256",
@@ -2738,9 +2803,7 @@ def validate_stimulus_manifest(
         or value["fixtures"] != [fixture_identity(spec) for spec in FIXTURES]
     ):
         raise AudioWorkspaceEvalContractError("stimulus manifest frozen identity changed")
-    if not _is_sha256(value["espeak_binary_sha256"]) or not _is_sha256(
-        value["espeak_voices_sha256"]
-    ):
+    if not _is_sha256(value["tts_recipe_sha256"]):
         raise AudioWorkspaceEvalContractError("stimulus engine identity is invalid")
     _validate_source_identity(value["source_identity"])
     _validate_runtime_environment(value["runtime_identity"], include_cuda=False)
@@ -2806,6 +2869,8 @@ def validate_stimulus_manifest(
         "variant",
         "language",
         "script_sha256",
+        "tts_input",
+        "tts_input_sha256",
         "wav_relative_path",
         "source_wav_sha256",
         "source_pcm_sha256",
@@ -2815,9 +2880,6 @@ def validate_stimulus_manifest(
         "sample_rate",
         "sample_count",
         "duration_seconds",
-        "argv",
-        "phonemes",
-        "phoneme_sha256",
     }
     paths: set[str] = set()
     stimulus_wave: set[str] = set()
@@ -2838,9 +2900,11 @@ def validate_stimulus_manifest(
             != (item["distribution"], item["name"], variant)
             or observation["language"] != item["language"]
             or observation["script_sha256"] != item["script_sha256"]
-            or observation["argv"] != tts_argv(item["language"], variant, item["script"])
+            or observation["tts_input"] != tts_input(item["script"])
+            or observation["tts_input_sha256"]
+            != sha256_bytes(str(observation["tts_input"]).encode("utf-8"))
         ):
-            raise AudioWorkspaceEvalContractError("stimulus observation order or TTS argv changed")
+            raise AudioWorkspaceEvalContractError("stimulus observation order or TTS input changed")
         duration = observation["duration_seconds"]
         if (
             observation["source_sample_rate"] != TTS_SAMPLE_RATE
@@ -2859,20 +2923,14 @@ def validate_stimulus_manifest(
             )
         ):
             raise AudioWorkspaceEvalContractError("stimulus observation audio geometry changed")
-        phonemes = observation["phonemes"]
-        if (
-            any(
-                not _is_sha256(observation[key])
-                for key in (
-                    "source_wav_sha256",
-                    "source_pcm_sha256",
-                    "normalized_wav_sha256",
-                    "decoded_pcm_sha256",
-                    "phoneme_sha256",
-                )
+        if any(
+            not _is_sha256(observation[key])
+            for key in (
+                "source_wav_sha256",
+                "source_pcm_sha256",
+                "normalized_wav_sha256",
+                "decoded_pcm_sha256",
             )
-            or not isinstance(phonemes, str)
-            or observation["phoneme_sha256"] != sha256_bytes(phonemes.encode("utf-8"))
         ):
             raise AudioWorkspaceEvalContractError("stimulus observation hashes changed")
         path = observation["wav_relative_path"]
@@ -2992,13 +3050,16 @@ def _validate_calibration_cells(
         if {key: cell[key] for key in expected} != expected:
             raise AudioWorkspaceEvalContractError("calibration coordinate order changed")
         item = item_by_coordinate[(cell["distribution"], cell["name"])]
+        language = str(cell["language"])
         if (
             cell["reference"] != item["script"]
-            or cell["normalized_reference"] != normalize_transcript(cell["reference"])
-            or cell["normalized_transcript"] != normalize_transcript(cell["transcript"])
+            or cell["normalized_reference"]
+            != normalize_transcript_for_language(cell["reference"], language)
+            or cell["normalized_transcript"]
+            != normalize_transcript_for_language(cell["transcript"], language)
         ):
             raise AudioWorkspaceEvalContractError("calibration transcript normalization changed")
-        expected_cer = character_error_rate(cell["reference"], cell["transcript"])
+        expected_cer = character_error_rate(cell["reference"], cell["transcript"], language)
         if (
             isinstance(cell["cer"], bool)
             or not isinstance(cell["cer"], (int, float))

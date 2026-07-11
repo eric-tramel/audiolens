@@ -285,7 +285,7 @@ def _stimulus_manifest() -> dict[str, Any]:
         item_index = index // 2
         item = items[item_index]
         voice = audio_eval.TTS_VARIANTS[index % 2]
-        phonemes = f"phonemes-{index}"
+        spoken = audio_eval.tts_input(item["script"])
         observations.append(
             {
                 "observation_index": index,
@@ -295,6 +295,8 @@ def _stimulus_manifest() -> dict[str, Any]:
                 "variant": voice,
                 "language": item["language"],
                 "script_sha256": item["script_sha256"],
+                "tts_input": spoken,
+                "tts_input_sha256": audio_eval.sha256_bytes(spoken.encode()),
                 "wav_relative_path": f"wavs/{index:03d}-{voice}.wav",
                 "source_wav_sha256": audio_eval.canonical_sha256(["source-wav", index]),
                 "source_pcm_sha256": audio_eval.canonical_sha256(["source-pcm", index]),
@@ -304,9 +306,6 @@ def _stimulus_manifest() -> dict[str, Any]:
                 "sample_rate": audio_eval.NORMALIZED_SAMPLE_RATE,
                 "sample_count": 16_000 + index,
                 "duration_seconds": (16_000 + index) / 16_000,
-                "argv": audio_eval.tts_argv(item["language"], voice, item["script"]),
-                "phonemes": phonemes,
-                "phoneme_sha256": audio_eval.sha256_bytes(phonemes.encode()),
             }
         )
     fit_rows = [
@@ -327,8 +326,7 @@ def _stimulus_manifest() -> dict[str, Any]:
         items=items,
         observations=observations,
         overlap_audit=overlap,
-        espeak_binary_sha256="3" * 64,
-        espeak_voices_sha256="4" * 64,
+        tts_recipe_sha256="3" * 64,
         source_identity=_source_identity(),
         runtime_identity=_runtime_environment(include_cuda=False),
     )
@@ -341,13 +339,15 @@ def _calibration(stimulus: dict[str, Any]) -> dict[str, Any]:
     for coordinate in audio_eval.calibration_coordinates(items):
         item = item_by_coordinate[(coordinate["distribution"], coordinate["name"])]
         reference = item["script"]
+        language = str(coordinate["language"])
+        normalized = audio_eval.normalize_transcript_for_language(reference, language)
         cells.append(
             {
                 **coordinate,
                 "reference": reference,
                 "transcript": reference,
-                "normalized_reference": audio_eval.normalize_transcript(reference),
-                "normalized_transcript": audio_eval.normalize_transcript(reference),
+                "normalized_reference": normalized,
+                "normalized_transcript": normalized,
                 "cer": 0.0,
             }
         )
@@ -580,8 +580,12 @@ def test_frozen_coordinates_configs_statuses_and_no_alternate_choices():
         *audio_eval.CANDIDATE_LAYERS,
         *audio_eval.MOTOR_LAYERS,
     ) == audio_eval.LENS_LAYERS
-    assert audio_eval.TTS_VARIANTS == ("m1", "f1")
-    assert len(audio_eval.LANGUAGE_TO_ESPEAK) == 34
+    assert audio_eval.TTS_VARIANTS == ("onyx", "nova")
+    assert audio_eval.TTS_ENGINE == "openai-tts"
+    assert audio_eval.TTS_MODEL == "gpt-4o-mini-tts"
+    assert audio_eval.TTS_SAMPLE_RATE == 24_000
+    assert (audio_eval.RESAMPLE_UP, audio_eval.RESAMPLE_DOWN) == (2, 3)
+    assert len(audio_eval.LANGUAGE_CODES) == 34
     assert audio_eval.BOOTSTRAP_REPLICATES == audio_eval.PERMUTATION_REPLICATES == 10_000
     assert audio_eval.SCIENTIFIC_STATUSES == (
         "validated_fixed_band_synthetic_speech_readout",
@@ -604,7 +608,7 @@ def test_frozen_coordinates_configs_statuses_and_no_alternate_choices():
     )
 
 
-def test_spoken_boundaries_tts_argv_languages_and_allowed_forms_are_exact():
+def test_spoken_boundaries_tts_input_languages_and_allowed_forms_are_exact():
     assert (
         audio_eval.spoken_script(
             "association", {"prompt": "A complete sentence.", "intermediates": ["x"]}
@@ -621,21 +625,10 @@ def test_spoken_boundaries_tts_argv_languages_and_allowed_forms_are_exact():
     )
     assert audio_eval.language_for_coordinate("association", "grief") == "en-us"
     assert audio_eval.language_for_coordinate("multilingual", "chinese-color-banana") == "cmn"
-    assert audio_eval.tts_argv("en-us", "m1", "literal script") == [
-        "espeak-ng",
-        "-s",
-        "180",
-        "-p",
-        "50",
-        "-a",
-        "100",
-        "-g",
-        "10",
-        "-v",
-        "en-us+m1",
-        "--stdout",
-        "literal script",
-    ]
+    assert audio_eval.tts_input('Протилежність "день" - це "') == "Протилежність день - це"
+    assert audio_eval.tts_input("plain script") == "plain script"
+    with pytest.raises(audio_eval.AudioWorkspaceEvalContractError, match="empty"):
+        audio_eval.tts_input('" "')
     assert audio_eval.allowed_forms("order-ops", "multiplication") == (
         "multiplication",
         "*",
@@ -739,7 +732,7 @@ def test_exact_record_schema_two_positions_l0_l34_and_mutations_reject():
         runtime_identity=runtime_identity,
     )
     assert len(validated) == audio_eval.EXPECTED_OBSERVATION_COUNT
-    assert [record["variant"] for record in validated[:4]] == ["m1", "f1", "m1", "f1"]
+    assert [record["variant"] for record in validated[:4]] == ["onyx", "nova", "onyx", "nova"]
     for record in (validated[0], validated[-1]):
         assert set(record["positions"]) == set(audio_eval.POSITIONS)
         assert all(
@@ -962,7 +955,7 @@ def test_each_adjudication_criterion_is_independently_required():
         lambda value: value["semantic_vs_logit"]["distribution_point_deltas"].update(
             association=-1e-12
         ),
-        lambda value: value["semantic_vs_logit"]["variant_point_deltas"].update(m1=-1e-12),
+        lambda value: value["semantic_vs_logit"]["variant_point_deltas"].update(onyx=-1e-12),
         lambda value: value["structural_controls"]["candidate_minus_transposed"].update(
             lower_95=0.0
         ),
@@ -1127,15 +1120,26 @@ def test_stimulus_calibration_preregistration_round_trip_and_resealed_mutations_
         match="WAV path identity",
     ):
         audio_eval.validate_stimulus_manifest(duplicate_path)
-    nontext_phonemes = copy.deepcopy(stimulus)
-    nontext_phonemes["observations"][0]["phonemes"] = 123
-    nontext_phonemes["observations"][0]["phoneme_sha256"] = audio_eval.sha256_bytes(b"123")
-    nontext_phonemes = audio_eval.seal_mapping(nontext_phonemes, "stimulus_manifest_sha256")
+    bad_wav_hash = copy.deepcopy(stimulus)
+    bad_wav_hash["observations"][0]["source_wav_sha256"] = "not-a-sha"
+    bad_wav_hash = audio_eval.seal_mapping(bad_wav_hash, "stimulus_manifest_sha256")
     with pytest.raises(
         audio_eval.AudioWorkspaceEvalContractError,
         match="observation hashes",
     ):
-        audio_eval.validate_stimulus_manifest(nontext_phonemes)
+        audio_eval.validate_stimulus_manifest(bad_wav_hash)
+    forged_input = copy.deepcopy(stimulus)
+    forged_spoken = "forged spoken input"
+    forged_input["observations"][0]["tts_input"] = forged_spoken
+    forged_input["observations"][0]["tts_input_sha256"] = audio_eval.sha256_bytes(
+        forged_spoken.encode()
+    )
+    forged_input = audio_eval.seal_mapping(forged_input, "stimulus_manifest_sha256")
+    with pytest.raises(
+        audio_eval.AudioWorkspaceEvalContractError,
+        match="TTS input",
+    ):
+        audio_eval.validate_stimulus_manifest(forged_input)
 
     script_mutation = copy.deepcopy(stimulus)
     mutated_script = "resealed alternate confirmatory script"
@@ -1144,10 +1148,9 @@ def test_stimulus_calibration_preregistration_round_trip_and_resealed_mutations_
     script_mutation["items"][0]["script_sha256"] = mutated_script_sha
     for observation in script_mutation["observations"][:2]:
         observation["script_sha256"] = mutated_script_sha
-        observation["argv"] = audio_eval.tts_argv(
-            observation["language"],
-            observation["variant"],
-            mutated_script,
+        observation["tts_input"] = audio_eval.tts_input(mutated_script)
+        observation["tts_input_sha256"] = audio_eval.sha256_bytes(
+            audio_eval.tts_input(mutated_script).encode()
         )
     script_mutation["overlap_audit"]["stimulus_transcript_set_sha256"] = (
         audio_eval.canonical_sha256(
@@ -1393,6 +1396,7 @@ def test_deployment_module_is_import_light_and_has_only_four_explicit_modes(
         "validate_report",
         "preregistration",
         "sha256",
+        "tts_recipe",
     ]
     assert "limit" not in inspect.signature(deployment.main).parameters
     assert "debug" not in inspect.signature(deployment.main).parameters
@@ -1414,62 +1418,97 @@ def test_deployment_bounded_reader_rejects_symlinks_and_oversize_files(
         deployment._read_bounded_bytes(source, label="test", maximum=4)
 
 
-def test_deployment_archive_guard_accepts_internal_symlink(monkeypatch):
-    import tarfile
+def _write_sealed_recipe(
+    deployment: Any,
+    root: Any,
+    *,
+    observations: list[dict[str, Any]] | None = None,
+    smoke_observations: list[dict[str, Any]] | None = None,
+) -> tuple[str, Any]:
+    import json
+
+    if observations is None:
+        observations = [
+            {"observation_index": index, "wav_relative_path": f"wavs/{index:03d}.wav"}
+            for index in range(audio_eval.EXPECTED_OBSERVATION_COUNT)
+        ]
+    if smoke_observations is None:
+        smoke_observations = [
+            {"publication_index": 50 + index, "wav_relative_path": f"smoke/{50 + index}.wav"}
+            for index in range(2)
+        ]
+    body = {
+        "schema_version": 1,
+        "kind": deployment.TTS_RECIPE_KIND,
+        "engine": deployment._expected_tts_engine(),
+        "synthesized_at": "2026-07-11T00:00:00Z",
+        "observations": observations,
+        "smoke_observations": smoke_observations,
+    }
+    sealed = audio_eval.seal_mapping(body, "recipe_sha256")
+    recipe_root = root / sealed["recipe_sha256"]
+    recipe_root.mkdir(parents=True)
+    (recipe_root / "recipe.json").write_text(json.dumps(sealed))
+    return sealed["recipe_sha256"], recipe_root
+
+
+def test_deployment_tts_recipe_seal_engine_and_wav_bytes_are_enforced(monkeypatch, tmp_path):
+    import json
 
     deployment = _load_modal_audio_workspace_eval(monkeypatch)
-    internal = tarfile.TarInfo("espeak-ng-1.52.0/src/include/espeak/speak_lib.h")
-    internal.type = tarfile.SYMTYPE
-    internal.linkname = "../espeak-ng/speak_lib.h"
-    deployment._validate_espeak_archive_member(internal)
+    recipe_sha, recipe_root = _write_sealed_recipe(deployment, tmp_path)
+    recipe, loaded_root = deployment._load_tts_recipe(recipe_sha, root=tmp_path)
+    assert loaded_root == recipe_root
+    assert recipe["recipe_sha256"] == recipe_sha
+    assert recipe["engine"]["engine"] == "openai-tts"
 
-    escaping = tarfile.TarInfo("espeak-ng-1.52.0/src/include/escape.h")
-    escaping.type = tarfile.SYMTYPE
-    escaping.linkname = "../../../../etc/passwd"
-    with pytest.raises(RuntimeError, match="unsafe eSpeak archive link"):
-        deployment._validate_espeak_archive_member(escaping)
+    with pytest.raises(deployment.ModalAudioWorkspaceEvalError, match="SHA-256"):
+        deployment._load_tts_recipe("short", root=tmp_path)
 
+    tampered = json.loads((recipe_root / "recipe.json").read_text())
+    tampered["synthesized_at"] = "2026-07-12T00:00:00Z"
+    (recipe_root / "recipe.json").write_text(json.dumps(tampered))
+    with pytest.raises(deployment.ModalAudioWorkspaceEvalError, match="seal"):
+        deployment._load_tts_recipe(recipe_sha, root=tmp_path)
 
-def test_deployment_literal_espeak_argv_never_uses_a_shell(monkeypatch):
-    import types
+    wrong_engine = dict(deployment._expected_tts_engine(), model="other-tts")
+    body = {
+        "schema_version": 1,
+        "kind": deployment.TTS_RECIPE_KIND,
+        "engine": wrong_engine,
+        "synthesized_at": "2026-07-11T00:00:00Z",
+        "observations": [{} for _ in range(audio_eval.EXPECTED_OBSERVATION_COUNT)],
+        "smoke_observations": [{}, {}],
+    }
+    sealed = audio_eval.seal_mapping(body, "recipe_sha256")
+    other_root = tmp_path / sealed["recipe_sha256"]
+    other_root.mkdir()
+    (other_root / "recipe.json").write_text(json.dumps(sealed))
+    with pytest.raises(deployment.ModalAudioWorkspaceEvalError, match="frozen identity"):
+        deployment._load_tts_recipe(sealed["recipe_sha256"], root=tmp_path)
 
-    deployment = _load_modal_audio_workspace_eval(monkeypatch)
-    calls = []
-
-    def runner(argv, **kwargs):
-        calls.append((list(argv), dict(kwargs)))
-        output = b"RIFF-fake" if "--stdout" in argv else b"f eI k"
-        return types.SimpleNamespace(stdout=output)
-
-    wav, phonemes, recorded = deployment._run_espeak(
-        "/opt/espeak-ng/bin/espeak-ng",
-        "fr",
-        "m1",
-        "Bonjour",
-        runner=runner,
-    )
-    assert wav == b"RIFF-fake"
-    assert phonemes == b"f eI k"
-    assert recorded == [
-        "espeak-ng",
-        "-s",
-        "180",
-        "-p",
-        "50",
-        "-a",
-        "100",
-        "-g",
-        "10",
-        "-v",
-        "fr+m1",
-        "--stdout",
-        "Bonjour",
-    ]
-    assert calls[0][0] == [
-        "/opt/espeak-ng/bin/espeak-ng",
-        *recorded[1:],
-    ]
-    assert all(call[1] == {"check": True, "capture_output": True} for call in calls)
+    payload = b"RIFF-sealed-bytes"
+    (recipe_root / "wavs").mkdir()
+    wav_path = recipe_root / "wavs" / "000.wav"
+    wav_path.write_bytes(payload)
+    entry = {
+        "wav_relative_path": "wavs/000.wav",
+        "source_wav_sha256": audio_eval.sha256_bytes(payload),
+        "n_bytes": len(payload),
+    }
+    assert deployment._read_recipe_wav(recipe_root, entry, label="test") == payload
+    with pytest.raises(deployment.ModalAudioWorkspaceEvalError, match="path is invalid"):
+        deployment._read_recipe_wav(
+            recipe_root,
+            {**entry, "wav_relative_path": "../escape.wav"},
+            label="test",
+        )
+    with pytest.raises(deployment.ModalAudioWorkspaceEvalError, match="bytes changed"):
+        deployment._read_recipe_wav(
+            recipe_root,
+            {**entry, "source_wav_sha256": "0" * 64},
+            label="test",
+        )
 
 
 def test_deployment_fake_smoke_duplicates_inference_and_never_uses_final_lens(
@@ -1539,7 +1578,7 @@ def test_deployment_fake_smoke_duplicates_inference_and_never_uses_final_lens(
                 "name": item["name"],
                 "score": score,
                 "audio": {
-                    "source_sample_rate": 22_050,
+                    "source_sample_rate": 24_000,
                     "source_sample_count": 10,
                     "source_decoded_pcm_sha256": "1" * 64,
                     "sample_rate": 16_000,
@@ -1728,29 +1767,48 @@ def test_deployment_fake_staging_writes_exact_wavs_and_pure_manifest(
 ):
     deployment = _load_modal_audio_workspace_eval(monkeypatch)
     items = _spoken_items()
-    counter = {"value": 0}
 
-    monkeypatch.setattr(
-        deployment,
-        "_engine_identity",
-        lambda binary, runner: {
-            "version": "1.52.0",
-            "binary_sha256": "1" * 64,
-            "voices_sha256": "2" * 64,
+    recipe_entries = []
+    source_payloads: dict[str, bytes] = {}
+    for index in range(audio_eval.EXPECTED_OBSERVATION_COUNT):
+        item = items[index // 2]
+        variant = audio_eval.TTS_VARIANTS[index % 2]
+        spoken = audio_eval.tts_input(item["script"])
+        payload = f"source-{index}".encode()
+        relative = f"wavs/{index:03d}-{variant}.wav"
+        source_payloads[relative] = payload
+        recipe_entries.append(
+            {
+                "observation_index": index,
+                "coordinate_index": index // 2,
+                "distribution": item["distribution"],
+                "name": item["name"],
+                "variant": variant,
+                "language": item["language"],
+                "script_sha256": item["script_sha256"],
+                "tts_input": spoken,
+                "tts_input_sha256": audio_eval.sha256_bytes(spoken.encode()),
+                "wav_relative_path": relative,
+                "source_wav_sha256": deployment._sha256_bytes(payload),
+                "n_bytes": len(payload),
+            }
+        )
+    recipe = audio_eval.seal_mapping(
+        {
+            "schema_version": 1,
+            "kind": deployment.TTS_RECIPE_KIND,
+            "engine": deployment._expected_tts_engine(),
+            "synthesized_at": "2026-07-11T00:00:00Z",
+            "observations": recipe_entries,
+            "smoke_observations": [{}, {}],
         },
+        "recipe_sha256",
     )
-
-    def fake_espeak(binary, language, variant, script, runner):
-        index = counter["value"]
-        counter["value"] += 1
-        source = f"source-{index}".encode()
-        phonemes = f"phoneme-{index}".encode()
-        return source, phonemes, audio_eval.tts_argv(language, variant, script)
 
     def fake_normalize(source):
         normalized = b"normalized-" + source
         return normalized, {
-            "source_sample_rate": 22_050,
+            "source_sample_rate": 24_000,
             "source_sample_count": 10,
             "source_decoded_pcm_sha256": deployment._sha256_bytes(source),
             "sample_rate": 16_000,
@@ -1759,7 +1817,6 @@ def test_deployment_fake_staging_writes_exact_wavs_and_pure_manifest(
             "decoded_pcm_sha256": deployment._sha256_bytes(normalized),
         }
 
-    monkeypatch.setattr(deployment, "_run_espeak", fake_espeak)
     monkeypatch.setattr(deployment, "_normalize_wav", fake_normalize)
     monkeypatch.setattr(deployment, "STIMULUS_ROOT", str(tmp_path / "stimuli"))
     manifest, path = deployment._stage_stimuli(
@@ -1784,9 +1841,11 @@ def test_deployment_fake_staging_writes_exact_wavs_and_pure_manifest(
             "packages": {package: "test-version" for package in audio_eval.RUNTIME_PACKAGES},
             "modal_image_id": "im-test",
         },
-        binary="/fake/espeak-ng",
-        runner=lambda *args, **kwargs: None,
+        tts_recipe_sha256=recipe["recipe_sha256"],
+        recipe_loader=lambda sha: (recipe, tmp_path / "source-stimuli" / sha),
+        wav_reader=lambda root, entry, label: source_payloads[entry["wav_relative_path"]],
     )
+    assert manifest["tts_recipe_sha256"] == recipe["recipe_sha256"]
     assert len(manifest["observations"]) == audio_eval.EXPECTED_OBSERVATION_COUNT
     assert len(list((path.parent / "wavs").glob("*.wav"))) == audio_eval.EXPECTED_OBSERVATION_COUNT
     assert (
@@ -1869,7 +1928,7 @@ def test_deployment_preparation_identity_binds_model_input_tensor_bytes(monkeypa
         "observation_index": 0,
         "distribution": "association",
         "name": "grief",
-        "variant": "m1",
+        "variant": "onyx",
         "normalized_wav_sha256": "a" * 64,
     }
     first = deployment._preparation_record(observation, prepared)
@@ -1901,6 +1960,7 @@ def test_deployment_dispatch_accepts_only_the_four_strict_modes(monkeypatch):
             validate_report="",
             preregistration="",
             sha256="",
+            tts_recipe="c" * 64,
             **common,
         )
         == "preregister"
@@ -1913,6 +1973,7 @@ def test_deployment_dispatch_accepts_only_the_four_strict_modes(monkeypatch):
             validate_report="",
             preregistration="",
             sha256="",
+            tts_recipe="c" * 64,
             **common,
         )
         == "smoke"
@@ -1925,6 +1986,7 @@ def test_deployment_dispatch_accepts_only_the_four_strict_modes(monkeypatch):
             validate_report="",
             preregistration="/vol/prereg.json",
             sha256="a" * 64,
+            tts_recipe="",
             **common,
         )
         == "evaluate"
@@ -1937,6 +1999,7 @@ def test_deployment_dispatch_accepts_only_the_four_strict_modes(monkeypatch):
             validate_report="/vol/report.json",
             preregistration="",
             sha256="b" * 64,
+            tts_recipe="",
             **common,
         )
         == "validate"
@@ -1949,6 +2012,7 @@ def test_deployment_dispatch_accepts_only_the_four_strict_modes(monkeypatch):
             validate_report="",
             preregistration="",
             sha256="",
+            tts_recipe="",
             **common,
         )
     with pytest.raises(SystemExit, match="requires"):
@@ -1959,6 +2023,29 @@ def test_deployment_dispatch_accepts_only_the_four_strict_modes(monkeypatch):
             validate_report="",
             preregistration="/vol/prereg.json",
             sha256="",
+            tts_recipe="",
+            **common,
+        )
+    with pytest.raises(SystemExit, match="requires --tts-recipe"):
+        deployment._dispatch(
+            preregister=True,
+            smoke=False,
+            evaluate=False,
+            validate_report="",
+            preregistration="",
+            sha256="",
+            tts_recipe="",
+            **common,
+        )
+    with pytest.raises(SystemExit, match="applies only"):
+        deployment._dispatch(
+            preregister=False,
+            smoke=False,
+            evaluate=True,
+            validate_report="",
+            preregistration="/vol/prereg.json",
+            sha256="a" * 64,
+            tts_recipe="c" * 64,
             **common,
         )
     assert [name for name, _ in calls] == [
@@ -2108,9 +2195,9 @@ def test_deployment_independent_validator_reloads_every_bound_artifact(
     }
     text_report = {"canonical": True}
 
-    def physical_validator(value, *, verify_synthesis):
+    def physical_validator(value, *, verify_normalization):
         assert value is preregistration
-        assert verify_synthesis is True
+        assert verify_normalization is True
         calls.append("physical")
         return (
             {"stimulus_manifest_sha256": "c" * 64, "items": []},

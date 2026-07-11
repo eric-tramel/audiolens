@@ -34,19 +34,18 @@ WHISPER_ID = "openai/whisper-large-v3-turbo"
 WHISPER_REVISION = "41f01f3fe87f28c78e2fbf8b568835947dd65ed9"
 JLENS_REVISION = "581d398613e5602a5af361e1c34d3a92ea82ba8e"
 
-ESPEAK_VERSION = "1.52.0"
-ESPEAK_URL = "https://github.com/espeak-ng/espeak-ng/archive/refs/tags/1.52.0.tar.gz"
-ESPEAK_TARBALL_SHA256 = "bb4338102ff3b49a81423da8a1a158b420124b055b60fa76cfb4b18677130a23"
-ESPEAK_BINARY = "/opt/espeak-ng/bin/espeak-ng"
-ESPEAK_VARIANTS = ("m1", "f1")
-ESPEAK_RATE = 180
-ESPEAK_PITCH = 50
-ESPEAK_AMPLITUDE = 100
-ESPEAK_WORD_GAP = 10
-SOURCE_SAMPLE_RATE = 22_050
+TTS_ENGINE = "openai-tts"
+TTS_ENDPOINT = "https://api.openai.com/v1/audio/speech"
+TTS_MODEL = "gpt-4o-mini-tts"
+TTS_RESPONSE_FORMAT = "wav"
+TTS_INPUT_POLICY = "strip_double_quotes_collapse_whitespace"
+TTS_SYNTHESIS_POLICY = "sealed_source_bytes_nonreproducible_generation"
+TTS_RECIPE_KIND = "audio_workspace_tts_recipe"
+TTS_VARIANTS = ("onyx", "nova")
+SOURCE_SAMPLE_RATE = 24_000
 SAMPLE_RATE = 16_000
-RESAMPLE_UP = 320
-RESAMPLE_DOWN = 441
+RESAMPLE_UP = 2
+RESAMPLE_DOWN = 3
 
 FINAL_AUDIO_FIT_CONFIG_SHA256 = "ee7cd4e42991fec5a00b4256ba466ff163ebd64fa22963334033066e7d531275"
 FINAL_AUDIO_LENS_SHA256 = "da0ccabf1ee14e4df060f97f31cf0132a0d3f6ed2cb45b6c77738693bc8f1aa9"
@@ -89,6 +88,7 @@ CALIBRATION_ROOT = f"{ARTIFACT_ROOT}/calibrations"
 PREREGISTRATION_ROOT = f"{ARTIFACT_ROOT}/preregistrations"
 REPORT_ROOT = f"{ARTIFACT_ROOT}/reports"
 SMOKE_ROOT = f"{ARTIFACT_ROOT}/smoke"
+SOURCE_STIMULI_ROOT = f"{ARTIFACT_ROOT}/source-stimuli"
 FIXTURE_CACHE_ROOT = f"{ARTIFACT_ROOT}/fixture-cache/{JLENS_REVISION}"
 
 FIXTURE_SPECS = (
@@ -139,7 +139,7 @@ FIXTURE_SPECS = (
     },
 )
 
-LANGUAGE_TO_ESPEAK = {
+LANGUAGE_CODES = {
     "arabic": "ar",
     "bengali": "bn",
     "bulgarian": "bg",
@@ -177,7 +177,7 @@ LANGUAGE_TO_ESPEAK = {
 }
 
 LANGUAGE_TO_WHISPER = {
-    **LANGUAGE_TO_ESPEAK,
+    **LANGUAGE_CODES,
     "chinese": "zh",
     "norwegian": "no",
 }
@@ -194,6 +194,7 @@ SOURCE_RELATIVES = (
     "src/audiolens/models/gemma4.py",
     "scripts/modal_audio_workspace_eval.py",
     "scripts/modal_workspace_eval.py",
+    "scripts/synthesize_audio_stimuli.py",
 )
 
 CANONICAL_FIT_SOURCE_RELATIVES = (
@@ -330,63 +331,6 @@ def _git_revision() -> str | None:
         return os.environ.get("AUDIOLENS_GIT_REVISION") or None
 
 
-def _validate_espeak_archive_member(member: Any) -> None:
-    """Reject archive paths or links that escape the pinned source root."""
-
-    import posixpath
-
-    path = pathlib.PurePosixPath(member.name)
-    if path.is_absolute() or ".." in path.parts or member.islnk():
-        raise RuntimeError(f"unsafe eSpeak archive member {member.name!r}")
-    if member.issym():
-        target = pathlib.PurePosixPath(posixpath.normpath(str(path.parent / member.linkname)))
-        if target.is_absolute() or ".." in target.parts:
-            raise RuntimeError(f"unsafe eSpeak archive link {member.name!r}")
-
-
-def _install_espeak() -> None:
-    """Build the pinned eSpeak release only after byte verification."""
-    import shutil
-    import tarfile
-    import urllib.request
-
-    with tempfile.TemporaryDirectory(prefix="espeak-build-") as temporary:
-        root = pathlib.Path(temporary)
-        archive = root / "espeak-ng.tar.gz"
-        with urllib.request.urlopen(ESPEAK_URL, timeout=120) as response:
-            raw = response.read(32 * 1024 * 1024 + 1)
-        if len(raw) > 32 * 1024 * 1024:
-            raise RuntimeError("eSpeak source archive exceeds 32 MiB")
-        actual = _sha256_bytes(raw)
-        if actual != ESPEAK_TARBALL_SHA256:
-            raise RuntimeError(f"eSpeak source SHA-256 mismatch: {actual}")
-        archive.write_bytes(raw)
-        source_root = root / "source"
-        source_root.mkdir()
-        with tarfile.open(archive, "r:gz") as tar:
-            members = tar.getmembers()
-            total = 0
-            for member in members:
-                _validate_espeak_archive_member(member)
-                total += member.size
-                if total > 128 * 1024 * 1024:
-                    raise RuntimeError("eSpeak source archive exceeds 128 MiB expanded")
-            tar.extractall(source_root, members=members, filter="data")
-        directories = [entry for entry in source_root.iterdir() if entry.is_dir()]
-        if len(directories) != 1:
-            raise RuntimeError("eSpeak archive root is ambiguous")
-        source = directories[0]
-        subprocess.run(["./autogen.sh"], cwd=source, check=True)
-        subprocess.run(["./configure", "--prefix=/opt/espeak-ng"], cwd=source, check=True)
-        subprocess.run(["make", "-j2"], cwd=source, check=True)
-        subprocess.run(["make", "install"], cwd=source, check=True)
-        binary = pathlib.Path(ESPEAK_BINARY)
-        if not binary.is_file():
-            raise RuntimeError("eSpeak build did not install the expected binary")
-        subprocess.run([ESPEAK_BINARY, "--version"], check=True, capture_output=True)
-        shutil.rmtree(source_root)
-
-
 SOURCE_DIGEST = _source_digest()
 LOCK_SHA256 = _lock_digest()
 GIT_REVISION = _git_revision()
@@ -405,15 +349,8 @@ if _DEPLOY_MODAL:
     image = (
         modal.Image.debian_slim(python_version="3.12")
         .apt_install(
-            "autoconf",
-            "automake",
-            "gcc",
             "git",
-            "libpcaudio-dev",
             "libsndfile1",
-            "libtool",
-            "make",
-            "pkg-config",
         )
         .uv_sync(
             uv_project_dir=str(REPO_ROOT),
@@ -421,7 +358,6 @@ if _DEPLOY_MODAL:
             groups=["fit"],
             gpu=MODEL_GPU,
         )
-        .run_function(_install_espeak)
         .env(
             {
                 "HF_HOME": f"{VOL_MOUNT}/hf",
@@ -723,58 +659,72 @@ def _bind_items_to_text_report(
         )
 
 
-def _espeak_argv(binary: str, voice_code: str, variant: str, script: str) -> list[str]:
-    del binary
-    from audiolens.audio_workspace_eval import tts_argv
-
-    return tts_argv(voice_code, variant, script)
-
-
-def _phoneme_argv(binary: str, voice_code: str, variant: str, script: str) -> list[str]:
-    return [
-        binary,
-        "-q",
-        "-x",
-        "-s",
-        str(ESPEAK_RATE),
-        "-p",
-        str(ESPEAK_PITCH),
-        "-a",
-        str(ESPEAK_AMPLITUDE),
-        "-g",
-        str(ESPEAK_WORD_GAP),
-        "-v",
-        f"{voice_code}+{variant}",
-        script,
-    ]
+def _expected_tts_engine() -> dict[str, Any]:
+    return {
+        "engine": TTS_ENGINE,
+        "endpoint": TTS_ENDPOINT,
+        "model": TTS_MODEL,
+        "response_format": TTS_RESPONSE_FORMAT,
+        "input_policy": TTS_INPUT_POLICY,
+        "synthesis_policy": TTS_SYNTHESIS_POLICY,
+        "voices": list(TTS_VARIANTS),
+    }
 
 
-def _run_espeak(
-    binary: str,
-    voice_code: str,
-    variant: str,
-    script: str,
+def _load_tts_recipe(
+    recipe_sha256: str,
     *,
-    runner: Callable[..., Any] = subprocess.run,
-) -> tuple[bytes, bytes, list[str]]:
-    argv = _espeak_argv(binary, voice_code, variant, script)
-    completed = runner([binary, *argv[1:]], check=True, capture_output=True)
-    wav = bytes(completed.stdout)
-    if not wav or len(wav) > MAX_AUDIO_BYTES:
-        raise ModalAudioWorkspaceEvalError("eSpeak returned invalid WAV bytes")
-    phoneme_completed = runner(
-        _phoneme_argv(binary, voice_code, variant, script),
-        check=True,
-        capture_output=True,
+    root: str | pathlib.Path = SOURCE_STIMULI_ROOT,
+) -> tuple[dict[str, Any], pathlib.Path]:
+    """Load and seal-check the sealed local-synthesis recipe for the run."""
+    from audiolens.audio_workspace_eval import validate_seal
+
+    if not isinstance(recipe_sha256, str) or len(recipe_sha256) != 64:
+        raise ModalAudioWorkspaceEvalError("TTS recipe identity must be a SHA-256")
+    recipe_root = pathlib.Path(root) / recipe_sha256
+    recipe = _read_json(recipe_root / "recipe.json", label="TTS recipe")
+    try:
+        value = validate_seal(recipe, "recipe_sha256", "TTS recipe")
+    except Exception as exc:
+        raise ModalAudioWorkspaceEvalError("TTS recipe seal is invalid") from exc
+    if value.get("recipe_sha256") != recipe_sha256:
+        raise ModalAudioWorkspaceEvalError("TTS recipe content digest mismatch")
+    if (
+        value.get("schema_version") != 1
+        or value.get("kind") != TTS_RECIPE_KIND
+        or value.get("engine") != _expected_tts_engine()
+        or not isinstance(value.get("synthesized_at"), str)
+        or not isinstance(value.get("observations"), list)
+        or len(value["observations"]) != EXPECTED_OBSERVATION_COUNT
+        or not isinstance(value.get("smoke_observations"), list)
+        or len(value["smoke_observations"]) != 2
+    ):
+        raise ModalAudioWorkspaceEvalError("TTS recipe frozen identity changed")
+    return value, recipe_root
+
+
+def _read_recipe_wav(recipe_root: pathlib.Path, entry: Mapping[str, Any], *, label: str) -> bytes:
+    relative = entry.get("wav_relative_path")
+    if (
+        not isinstance(relative, str)
+        or pathlib.PurePosixPath(relative).is_absolute()
+        or ".." in pathlib.PurePosixPath(relative).parts
+    ):
+        raise ModalAudioWorkspaceEvalError(f"{label} recipe WAV path is invalid")
+    payload = _read_bounded_bytes(
+        recipe_root / relative,
+        label=label,
+        maximum=MAX_AUDIO_BYTES,
     )
-    phonemes = bytes(phoneme_completed.stdout)
-    if len(phonemes) > 1024 * 1024:
-        raise ModalAudioWorkspaceEvalError("eSpeak phoneme output is oversized")
-    return wav, phonemes, argv
+    if _sha256_bytes(payload) != entry.get("source_wav_sha256") or len(payload) != entry.get(
+        "n_bytes"
+    ):
+        raise ModalAudioWorkspaceEvalError(f"{label} sealed source WAV bytes changed")
+    return payload
 
 
 def _normalize_wav(source_wav: bytes) -> tuple[bytes, dict[str, Any]]:
-    """Normalize eSpeak mono PCM16 to deterministic native 16 kHz PCM16."""
+    """Normalize sealed source mono PCM16 to deterministic native 16 kHz PCM16."""
     import io
 
     import numpy as np
@@ -791,11 +741,11 @@ def _normalize_wav(source_wav: bytes) -> tuple[bytes, dict[str, Any]]:
         or info.subtype != "PCM_16"
         or info.frames <= 0
     ):
-        raise ModalAudioWorkspaceEvalError("eSpeak WAV is not mono 22050 Hz PCM16")
+        raise ModalAudioWorkspaceEvalError("source WAV is not mono 24000 Hz PCM16")
     source_io.seek(0)
     source_pcm, decoded_rate = sf.read(source_io, dtype="int16", always_2d=False)
     if decoded_rate != SOURCE_SAMPLE_RATE or source_pcm.ndim != 1:
-        raise ModalAudioWorkspaceEvalError("decoded eSpeak WAV layout changed")
+        raise ModalAudioWorkspaceEvalError("decoded source WAV layout changed")
     normalized = resample_poly(
         source_pcm.astype(np.float64) / 32768.0,
         up=RESAMPLE_UP,
@@ -824,41 +774,6 @@ def _normalize_wav(source_wav: bytes) -> tuple[bytes, dict[str, Any]]:
     }
 
 
-def _engine_identity(
-    binary: str = ESPEAK_BINARY,
-    *,
-    runner: Callable[..., Any] = subprocess.run,
-) -> dict[str, Any]:
-    path = pathlib.Path(binary)
-    if not path.is_file() or path.is_symlink():
-        raise ModalAudioWorkspaceEvalError("pinned eSpeak binary is missing")
-    voices = bytes(runner([binary, "--voices"], check=True, capture_output=True).stdout)
-    version = bytes(runner([binary, "--version"], check=True, capture_output=True).stdout)
-    try:
-        version_text = version.decode("utf-8", errors="strict")
-        voices.decode("utf-8", errors="strict")
-    except UnicodeDecodeError as exc:
-        raise ModalAudioWorkspaceEvalError("eSpeak identity output is not UTF-8") from exc
-    if ESPEAK_VERSION not in version_text:
-        raise ModalAudioWorkspaceEvalError("built eSpeak version output does not identify 1.52.0")
-    return {
-        "version": ESPEAK_VERSION,
-        "source_url": ESPEAK_URL,
-        "source_tarball_sha256": ESPEAK_TARBALL_SHA256,
-        "binary_sha256": _sha256_file(path),
-        "voices_sha256": _sha256_bytes(voices),
-        "version_output_sha256": _sha256_bytes(version),
-        "argv_policy": {
-            "speed": ESPEAK_RATE,
-            "pitch": ESPEAK_PITCH,
-            "amplitude": ESPEAK_AMPLITUDE,
-            "word_gap": ESPEAK_WORD_GAP,
-            "variants": list(ESPEAK_VARIANTS),
-            "shell": False,
-        },
-    }
-
-
 def _stage_stimuli(
     items: Sequence[Mapping[str, Any]],
     fit_rows: Sequence[Mapping[str, Any]],
@@ -866,12 +781,14 @@ def _stage_stimuli(
     source_identity: Mapping[str, Any],
     runtime_identity: Mapping[str, Any],
     *,
-    binary: str = ESPEAK_BINARY,
-    runner: Callable[..., Any] = subprocess.run,
+    tts_recipe_sha256: str,
+    recipe_loader: Callable[[str], tuple[dict[str, Any], pathlib.Path]] = _load_tts_recipe,
+    wav_reader: Callable[..., bytes] = _read_recipe_wav,
 ) -> tuple[dict[str, Any], pathlib.Path]:
     from audiolens.audio_workspace_eval import (
         audit_fit_overlap,
         build_stimulus_manifest,
+        tts_input,
         validate_stimulus_manifest,
     )
 
@@ -879,24 +796,44 @@ def _stage_stimuli(
         raise ModalAudioWorkspaceEvalError(
             f"stimulus staging requires exactly {EXPECTED_ITEM_COUNT} items"
         )
-    engine = _engine_identity(binary, runner=runner)
+    recipe, recipe_root = recipe_loader(tts_recipe_sha256)
+    recipe_observations = recipe["observations"]
     observations: list[dict[str, Any]] = []
     wav_payloads: dict[str, bytes] = {}
     for coordinate_index, item in enumerate(items):
         if item["coordinate_index"] != coordinate_index:
             raise ModalAudioWorkspaceEvalError("stimulus coordinate index changed")
-        for variant in ESPEAK_VARIANTS:
-            source_wav, phoneme_bytes, argv = _run_espeak(
-                binary,
-                str(item["language"]),
-                variant,
-                str(item["script"]),
-                runner=runner,
-            )
-            normalized_wav, audio = _normalize_wav(source_wav)
+        for variant in TTS_VARIANTS:
             observation_index = len(observations)
+            entry = recipe_observations[observation_index]
+            spoken = tts_input(str(item["script"]))
+            if not isinstance(entry, Mapping) or (
+                entry.get("observation_index"),
+                entry.get("coordinate_index"),
+                entry.get("distribution"),
+                entry.get("name"),
+                entry.get("variant"),
+                entry.get("language"),
+                entry.get("script_sha256"),
+                entry.get("tts_input"),
+                entry.get("tts_input_sha256"),
+            ) != (
+                observation_index,
+                coordinate_index,
+                item["distribution"],
+                item["name"],
+                variant,
+                item["language"],
+                item["script_sha256"],
+                spoken,
+                _sha256_bytes(spoken.encode("utf-8")),
+            ):
+                raise ModalAudioWorkspaceEvalError(
+                    "sealed TTS recipe does not match the canonical spoken items"
+                )
+            source_wav = wav_reader(recipe_root, entry, label="stimulus source WAV")
+            normalized_wav, audio = _normalize_wav(source_wav)
             relative = f"wavs/{observation_index:03d}-{variant}.wav"
-            phonemes = phoneme_bytes.decode("utf-8", errors="strict")
             observations.append(
                 {
                     "observation_index": observation_index,
@@ -906,6 +843,8 @@ def _stage_stimuli(
                     "variant": variant,
                     "language": item["language"],
                     "script_sha256": item["script_sha256"],
+                    "tts_input": spoken,
+                    "tts_input_sha256": _sha256_bytes(spoken.encode("utf-8")),
                     "wav_relative_path": relative,
                     "source_wav_sha256": _sha256_bytes(source_wav),
                     "source_pcm_sha256": audio["source_decoded_pcm_sha256"],
@@ -915,9 +854,6 @@ def _stage_stimuli(
                     "sample_rate": audio["sample_rate"],
                     "sample_count": audio["sample_count"],
                     "duration_seconds": audio["duration_seconds"],
-                    "argv": argv,
-                    "phonemes": phonemes,
-                    "phoneme_sha256": _sha256_bytes(phonemes.encode("utf-8")),
                 }
             )
             wav_payloads[relative] = normalized_wav
@@ -938,8 +874,7 @@ def _stage_stimuli(
         items=items,
         observations=observations,
         overlap_audit=overlap,
-        espeak_binary_sha256=engine["binary_sha256"],
-        espeak_voices_sha256=engine["voices_sha256"],
+        tts_recipe_sha256=recipe["recipe_sha256"],
         source_identity=dict(source_identity),
         runtime_identity=runtime_identity,
     )
@@ -969,7 +904,7 @@ def _run_whisper_calibration(
     from audiolens.audio_workspace_eval import (
         build_calibration,
         character_error_rate,
-        normalize_transcript,
+        normalize_transcript_for_language,
         validate_calibration,
     )
 
@@ -1015,7 +950,7 @@ def _run_whisper_calibration(
         for row in manifest["observations"]
     }
     item_by_coordinate = {(item["distribution"], item["name"]): item for item in manifest["items"]}
-    language_name_by_espeak = {code: language for language, code in LANGUAGE_TO_ESPEAK.items()}
+    language_name_by_code = {code: language for language, code in LANGUAGE_CODES.items()}
     cells: list[dict[str, Any]] = []
     for coordinate in _calibration_coordinates(manifest):
         observation = observation_by_coordinate[
@@ -1027,7 +962,7 @@ def _run_whisper_calibration(
         ]
         item = item_by_coordinate[(coordinate["distribution"], coordinate["name"])]
         wav = root / observation["wav_relative_path"]
-        language_name = language_name_by_espeak[coordinate["language"]]
+        language_name = language_name_by_code[coordinate["language"]]
         whisper_code = LANGUAGE_TO_WHISPER[language_name]
         with _verified_local_copy(
             wav,
@@ -1040,14 +975,17 @@ def _run_whisper_calibration(
         if not isinstance(transcript, str):
             raise ModalAudioWorkspaceEvalError("Whisper transcriber returned nontext")
         reference = item["script"]
+        cell_language = str(coordinate["language"])
         cells.append(
             {
                 **coordinate,
                 "reference": reference,
                 "transcript": transcript,
-                "normalized_reference": normalize_transcript(reference),
-                "normalized_transcript": normalize_transcript(transcript),
-                "cer": character_error_rate(reference, transcript),
+                "normalized_reference": normalize_transcript_for_language(reference, cell_language),
+                "normalized_transcript": normalize_transcript_for_language(
+                    transcript, cell_language
+                ),
+                "cer": character_error_rate(reference, transcript, cell_language),
             }
         )
     calibration = build_calibration(
@@ -1405,7 +1343,7 @@ def _validate_physical_stimuli(
     preregistration: Mapping[str, Any],
     *,
     processor_loader: Callable[[], Any] | None = None,
-    verify_synthesis: bool = False,
+    verify_normalization: bool = False,
 ) -> tuple[dict[str, Any], pathlib.Path, dict[str, Any]]:
     import io
     import numpy as np
@@ -1437,13 +1375,9 @@ def _validate_physical_stimuli(
         raise ModalAudioWorkspaceEvalError(
             "stimulus runtime identity differs from preregistration or validator"
         )
-    current_engine = _engine_identity()
-    if (
-        manifest.get("source_identity") != preregistration["source_identity"]
-        or manifest.get("espeak_binary_sha256") != current_engine["binary_sha256"]
-        or manifest.get("espeak_voices_sha256") != current_engine["voices_sha256"]
-    ):
-        raise ModalAudioWorkspaceEvalError("stimulus source or pinned eSpeak identity changed")
+    recipe, recipe_root = _load_tts_recipe(str(manifest.get("tts_recipe_sha256")))
+    if manifest.get("source_identity") != preregistration["source_identity"]:
+        raise ModalAudioWorkspaceEvalError("stimulus source identity changed")
     calibration_path = (
         pathlib.Path(CALIBRATION_ROOT) / f"{preregistration['calibration_sha256']}.json"
     )
@@ -1473,26 +1407,18 @@ def _validate_physical_stimuli(
             or int(pcm.size) != observation["sample_count"]
         ):
             raise ModalAudioWorkspaceEvalError("stimulus decoded PCM identity changed")
-        if verify_synthesis:
-            source_wav, phonemes, argv = _run_espeak(
-                ESPEAK_BINARY,
-                str(observation["language"]),
-                str(observation["variant"]),
-                str(manifest["items"][observation["coordinate_index"]]["script"]),
-            )
+        if verify_normalization:
+            entry = recipe["observations"][int(observation["observation_index"])]
+            source_wav = _read_recipe_wav(recipe_root, entry, label="sealed source WAV")
             normalized_wav, audio = _normalize_wav(source_wav)
             if (
-                argv != observation["argv"]
-                or _sha256_bytes(source_wav) != observation["source_wav_sha256"]
+                _sha256_bytes(source_wav) != observation["source_wav_sha256"]
                 or audio["source_decoded_pcm_sha256"] != observation["source_pcm_sha256"]
                 or _sha256_bytes(normalized_wav) != observation["normalized_wav_sha256"]
                 or audio["decoded_pcm_sha256"] != observation["decoded_pcm_sha256"]
                 or audio["sample_count"] != observation["sample_count"]
-                or phonemes.decode("utf-8", errors="strict") != observation["phonemes"]
             ):
-                raise ModalAudioWorkspaceEvalError(
-                    "independent eSpeak synthesis reproduction changed"
-                )
+                raise ModalAudioWorkspaceEvalError("independent normalization reproduction changed")
     if processor_loader is None:
         from audiolens.models import load_audio_processor
 
@@ -1993,6 +1919,7 @@ def _validate_complete_report(
 
 
 def _preregister_impl(
+    tts_recipe_sha256: str = "",
     *,
     fixture_loader: Callable[[], Mapping[str, bytes]] = _fetch_fixtures,
     stimulus_stager: Callable[..., tuple[dict[str, Any], pathlib.Path]] = _stage_stimuli,
@@ -2020,6 +1947,7 @@ def _preregister_impl(
         _sha256_file(FINAL_AUDIO_RUN_PATH),
         source_identity,
         stimulus_runtime_environment,
+        tts_recipe_sha256=tts_recipe_sha256,
     )
     calibration = calibration_runner(manifest, manifest_path)
     calibration_path = pathlib.Path(CALIBRATION_ROOT) / (
@@ -2297,6 +2225,7 @@ def _validate_smoke_records(
 
 
 def _smoke_impl(
+    tts_recipe_sha256: str = "",
     *,
     fixture_loader: Callable[[], Mapping[str, bytes]] = _fetch_fixtures,
     inference: Callable[[Sequence[Mapping[str, Any]]], list[dict[str, Any]]] | None = None,
@@ -2323,7 +2252,14 @@ def _smoke_impl(
         for index, row in enumerate(source_rows)
     ]
     if inference is None:
-        engine_identity = _engine_identity()
+        from audiolens.audio_workspace_eval import tts_input
+
+        recipe, recipe_root = _load_tts_recipe(tts_recipe_sha256)
+        engine_identity = {
+            "recipe_sha256": recipe["recipe_sha256"],
+            "synthesized_at": recipe["synthesized_at"],
+            **recipe["engine"],
+        }
         torch = _deterministic_torch()
         from audiolens.audio_eval_model import prepare_audio_evaluation
         from audiolens.models import (
@@ -2370,8 +2306,27 @@ def _smoke_impl(
         with tempfile.TemporaryDirectory(prefix="audio-workspace-smoke-") as temporary:
             root = pathlib.Path(temporary)
             staged: list[tuple[dict[str, Any], pathlib.Path, dict[str, Any]]] = []
-            for item in smoke_items:
-                source, _phonemes, _argv = _run_espeak(ESPEAK_BINARY, "en-us", "m1", item["script"])
+            for item, entry in zip(smoke_items, recipe["smoke_observations"], strict=True):
+                spoken = tts_input(str(item["script"]))
+                if not isinstance(entry, Mapping) or (
+                    entry.get("publication_index"),
+                    entry.get("name"),
+                    entry.get("script_sha256"),
+                    entry.get("tts_input"),
+                    entry.get("variant"),
+                    entry.get("language"),
+                ) != (
+                    item["publication_index"],
+                    item["name"],
+                    item["script_sha256"],
+                    spoken,
+                    TTS_VARIANTS[0],
+                    "en-us",
+                ):
+                    raise ModalAudioWorkspaceEvalError(
+                        "sealed TTS recipe smoke rows do not match the nonpublication items"
+                    )
+                source = _read_recipe_wav(recipe_root, entry, label="smoke source WAV")
                 wav, audio = _normalize_wav(source)
                 path = root / f"{item['publication_index']}.wav"
                 path.write_bytes(wav)
@@ -2515,7 +2470,7 @@ def _validate_report_impl(
     text_report = text_loader()
     manifest, _manifest_path, _calibration = physical_validator(
         preregistration,
-        verify_synthesis=True,
+        verify_normalization=True,
     )
     _bind_items_to_text_report(manifest["items"], text_report)
     run = completed_run_loader()
@@ -2565,13 +2520,13 @@ def _validate_report_impl(
 
 
 @_modal_gpu_function(timeout=24 * 60 * 60)
-def preregister_experiment() -> str:
-    return json.dumps(_preregister_impl(), sort_keys=True)
+def preregister_experiment(tts_recipe: str) -> str:
+    return json.dumps(_preregister_impl(tts_recipe), sort_keys=True)
 
 
 @_modal_gpu_function(timeout=6 * 60 * 60)
-def smoke_experiment() -> str:
-    return json.dumps(_smoke_impl(), sort_keys=True)
+def smoke_experiment(tts_recipe: str) -> str:
+    return json.dumps(_smoke_impl(tts_recipe), sort_keys=True)
 
 
 @_modal_gpu_function(timeout=24 * 60 * 60)
@@ -2592,6 +2547,7 @@ def _dispatch(
     validate_report: str,
     preregistration: str,
     sha256: str,
+    tts_recipe: str,
     preregister_call: Callable[..., Any],
     smoke_call: Callable[..., Any],
     evaluate_call: Callable[..., Any],
@@ -2605,11 +2561,17 @@ def _dispatch(
     if preregister:
         if preregistration or sha256:
             raise SystemExit("--preregister accepts no artifact arguments")
-        return preregister_call()
+        if not tts_recipe:
+            raise SystemExit("--preregister requires --tts-recipe")
+        return preregister_call(tts_recipe=tts_recipe)
     if smoke:
         if preregistration or sha256:
             raise SystemExit("--smoke accepts no artifact arguments")
-        return smoke_call()
+        if not tts_recipe:
+            raise SystemExit("--smoke requires --tts-recipe")
+        return smoke_call(tts_recipe=tts_recipe)
+    if tts_recipe:
+        raise SystemExit("--tts-recipe applies only to --preregister and --smoke")
     if evaluate:
         if not preregistration or not sha256:
             raise SystemExit("--evaluate requires --preregistration and --sha256")
@@ -2627,6 +2589,7 @@ def main(
     validate_report: str = "",
     preregistration: str = "",
     sha256: str = "",
+    tts_recipe: str = "",
 ):
     """Dispatch one and only one sealed deployment mode."""
     result = _dispatch(
@@ -2636,6 +2599,7 @@ def main(
         validate_report=validate_report,
         preregistration=preregistration,
         sha256=sha256,
+        tts_recipe=tts_recipe,
         preregister_call=preregister_experiment.remote,
         smoke_call=smoke_experiment.remote,
         evaluate_call=evaluate_experiment.remote,
