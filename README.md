@@ -203,6 +203,134 @@ preregistered protocol does not define a convergence threshold, so these
 descriptive diagnostics do not by themselves establish convergence, identify
 a formal J-space component, or support a workspace-region claim.
 
+## Fixed-band synthetic-speech evaluation
+
+The audio evaluator attempts the same fixed L13–L31 hypothesis and frozen
+publication-item concepts as the canonical text evaluator, without selecting a
+new range after seeing audio results. It speaks each of 259 eligible items in
+two voices (518 observations), calibrates one shortest non-number multilingual
+prompt per supported language with pinned `openai/whisper-large-v3`, and
+only then permits the final audio lens to score every L0–L33 layer. The final
+report is atomic: failed calibration or scoring publishes no partial
+confirmatory scores. This 259-item surface supersedes the initial 260-item
+feasibility target. `multilingual/filipino-opposite-up` and
+`multilingual/irish-opposite-big` remain excluded; both exclusions predate the
+first sealed preregistration and are retained so the item surface stays
+identical across stimulus-engine attempts. Neither was selected from lens
+results or calibration error rates.
+
+### Stimulus engines
+
+The first stimulus attempt rendered the scripts with a pinned, source-built
+eSpeak NG 1.52.0. Its independent ASR calibration failed (see below), so the
+protocol's `inconclusive_synthetic_stimulus` terminal state applied and no
+audio scores exist for that engine.
+
+The current stimulus engine is OpenAI `gpt-4o-mini-tts` over two voices
+(`onyx`, `nova`). API generation is not reproducible from pinned weights, so
+provenance is bound to sealed bytes instead: `scripts/synthesize_audio_stimuli.py`
+synthesizes every script once locally, rewrites each response into a canonical
+mono 24 kHz PCM16 RIFF container, hashes every file, and seals the set under a
+content-addressed recipe. Modal staging verifies each byte against the recipe
+before deterministic 24 kHz → 16 kHz normalization, and report validation
+independently re-derives every normalized WAV from the sealed source bytes.
+Dangling prompt quotes (which have no spoken form and silence the engine) are
+removed from the spoken input only; scripts, references, and CER normalization
+are unchanged by this because calibration normalization already strips
+punctuation. Calibration CER additionally maps Serbian Cyrillic to Gaj Latin
+before comparison, because the pinned ASR emits Serbian in Latin script.
+
+The calibration ASR is pinned to the full `openai/whisper-large-v3`. An
+initial attempt with `whisper-large-v3-turbo` terminated
+`inconclusive_synthetic_stimulus` on exactly one cell (`bn` at CER 12.88,
+a token repetition loop; macro CER 0.2376 passed), and a ten-render probe
+showed the distilled model loops or romanizes short Bengali regardless of
+render, so that failure measured the calibration model rather than the
+stimuli. Under the full model no probe render loops; the Bengali `onyx`
+render was pre-screened to one that decodes in Bengali script before the
+recipe was sealed, and the sealed calibration remains the binding gate with
+unchanged thresholds.
+
+Synthesize and upload the sealed stimuli, run the nonconfirmatory smoke, seal
+the preregistration, and request the confirmatory evaluation:
+
+```bash
+uv run python scripts/synthesize_audio_stimuli.py --output stimuli-build
+uv run modal volume put audiolens-vol stimuli-build/<recipe-sha256> \
+  audio-workspace-eval/source-stimuli/<recipe-sha256>
+uv run modal run scripts/modal_audio_workspace_eval.py --smoke \
+  --tts-recipe <recipe-sha256>
+uv run modal run scripts/modal_audio_workspace_eval.py --preregister \
+  --tts-recipe <recipe-sha256>
+uv run modal run scripts/modal_audio_workspace_eval.py --evaluate \
+  --preregistration /vol/audio-workspace-eval/preregistrations/<sha256>.json \
+  --sha256 <sha256>
+```
+
+### Observed synthetic-stimulus result (eSpeak attempt)
+
+The real H100 smoke completed both sacrificial observations across every
+position, layer, candidate readout, and control. Its content-addressed report is
+`audio-workspace-eval/smoke/3738d5e7d2e712cd4635f606ed59397359c589e817e44b3f865431c08cc1ac91.json`
+on `audiolens-vol`.
+
+The sealed full preregistration uses evaluator source SHA-256
+`189dbf36fafa17994ced984aedddb5d000077601cb91a1e4ec20d6e4589b9e59`
+and is retained as
+`audio-workspace-eval/preregistrations/d2f0a3d82f10a3c5f18450d86290f2ce18fd724ed919bbde74211cf63cc0576a.json`.
+Independent ASR calibration failed before the lens was loaded: macro character
+error rate was `0.51363` against the preregistered maximum `0.35`, maximum cell
+error was `2.52941` against `0.80`, and 13 of 68 cells exceeded the cell limit.
+The failures covered Bengali, Hindi, Japanese, Korean, Russian, Serbian, and
+Ukrainian stimuli. The evaluator therefore rejected the confirmatory request
+with `confirmatory evaluation requires passed calibration` and emitted no
+fixed-band comparison report. The scientifically valid result for that engine is
+`inconclusive_synthetic_stimulus`: the eSpeak renderings are not sufficiently
+intelligible to test whether the source-bound audio J-lens recovers the frozen
+intermediate labels, so they provide neither positive nor negative evidence for
+an audio workspace-like band.
+
+### Observed confirmatory result (OpenAI stimuli)
+
+The sealed OpenAI-stimulus run completed the full confirmatory pipeline for
+the first time. The sealed recipe is
+`74c784de9259c05fda62a0ae4ba46fe18db2a9180d366a8264cc3d4f70f609cb`, the passed
+calibration measured macro CER `0.03721` with maximum cell CER `0.52941`, the
+sealed preregistration is
+`audio-workspace-eval/preregistrations/95ff8518df9a09aa68a32a0044f60d146dfd820eb704f49ee7efb530822942ba.json`,
+and the complete 518-record report is
+`audio-workspace-eval/reports/4f928675c3b3e34a835da6af9d6a4e4bbc1ddd9b6bc172392285aa13fb4526e5.json`.
+
+The verdict is **`no_fixed_band_synthetic_speech_readout`**: a complete,
+score-bearing outcome, not a stimulus failure. At the last audio position the
+candidate L13–L31 transport shows a real but very small semantic advantage
+over the logit baseline: equal-distribution AUC `0.00323` versus `0.00095`,
+point delta `+0.00228` with paired-bootstrap lower 95% bound `+0.00136`,
+positive in all five distributions and both voices, and above the transposed,
+permuted, and early controls with confident bounds. That effect fails the
+preregistered magnitude and confirmation gates: the required point delta is
+`0.02` (observed is roughly ten times smaller), the max-stat label p-value is
+`0.01470` against the `0.01` limit, the candidate band does not beat the motor
+band (`-0.00608`, upper bound below zero), and no response-position criterion
+passes (label p `0.99960`). On the same 259 items the canonical text transport
+delta is `+0.0603` (`0.13125` versus `0.07092`) — roughly forty times the
+audio content-position AUC level — and the canonical text verdict remains
+`no_band`, unchanged.
+
+The honest summary: with these synthetic-speech inputs, the audio-conditioned
+lens carries a detectable trace of the target concepts through the fixed
+middle band, but nothing approaching a workspace-like readout, and the
+strictly-interpreted answer to the fixed-band hypothesis is no on both
+modalities.
+
+The independent validator reproduced the complete report — every physical
+artifact, re-derived normalized WAV, chain identity, statistic, criterion, and
+the report SHA-256 — from the sealed source on an H100-class container
+(`independently_reproduced: true`). Validation must run on the same compute
+class as the fit and evaluation because the bound fp64 stability
+recomputation follows the container's CPU thread topology; the small-CPU tier
+reproduces it only to within ulps, which the exact-float contract rejects.
+
 ## Mixed WikiText and LibriSpeech fit
 
 The reproducible mixed experiment refits the existing 400-prompt WikiText
