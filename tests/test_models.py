@@ -40,20 +40,26 @@ class _Tokenizer:
 class _Processor:
     audio_token_id = 9
 
-    def __init__(self, input_ids=None):
+    def __init__(self, input_ids=None, **model_inputs):
         self.tokenizer = _Tokenizer()
         self.input_ids = input_ids
+        self.model_inputs = {
+            "input_features": torch.ones(1, 4, 3),
+            "input_features_mask": torch.ones(1, 4, dtype=torch.bool),
+            **model_inputs,
+        }
         self.calls = []
 
     def apply_chat_template(self, messages, **kwargs):
         self.calls.append((messages, kwargs))
-        return {"input_ids": self.input_ids.clone()}
+        return {
+            "input_ids": self.input_ids.clone(),
+            **self.model_inputs,
+        }
 
 
 def _framed_ids(audio_tokens=50):
-    return torch.tensor(
-        [[2, 105, 2364, 107, 256000] + [9] * audio_tokens + [258883, 106, 107]]
-    )
+    return torch.tensor([[2, 105, 2364, 107, 256000] + [9] * audio_tokens + [258883, 106, 107]])
 
 
 def test_profile_lookup_is_pure_immutable_and_complete():
@@ -80,13 +86,12 @@ def test_profile_lookup_imports_no_ml_runtime_dependencies():
     )
     subprocess.run([sys.executable, "-c", code], check=True)
 
+
 def test_models_package_separates_base_and_gemma_family_features():
     assert models.ModelProfile is base.ModelProfile
     assert models.PreparedAudio is base.PreparedAudio
     assert models.GEMMA4_PROFILE is gemma4.GEMMA4_PROFILE
-    assert gemma4.GEMMA4_PROFILE.adapter_source == (
-        "audiolens.models.gemma4:GemmaAudioRuntime"
-    )
+    assert gemma4.GEMMA4_PROFILE.adapter_source == ("audiolens.models.gemma4:GemmaAudioRuntime")
     assert base.ModelProfile.__module__ == "audiolens.models.base"
     assert gemma4.GemmaAudioRuntime.__module__ == "audiolens.models.gemma4"
 
@@ -227,10 +232,28 @@ def test_gemma_processor_preparation_returns_explicit_decoder_positions():
         "n_valid_positions": 38,
     }
     messages, kwargs = processor.calls[0]
-    assert messages == [
-        {"role": "user", "content": [{"type": "audio", "audio": "clip.wav"}]}
-    ]
+    assert messages == [{"role": "user", "content": [{"type": "audio", "audio": "clip.wav"}]}]
     assert kwargs == {"tokenize": True, "return_dict": True, "return_tensors": "pt"}
+
+
+@pytest.mark.parametrize(
+    ("model_inputs", "message"),
+    [
+        ({"input_features": None}, "omitted required audio model inputs"),
+        (
+            {"input_features_mask": torch.zeros(1, 4, dtype=torch.bool)},
+            "selects no audio",
+        ),
+        ({"pixel_values": torch.ones(1, 3, 4, 4)}, "image/video inputs"),
+    ],
+)
+def test_gemma_preparation_requires_audio_only_model_inputs(
+    model_inputs,
+    message,
+):
+    processor = _Processor(_framed_ids(), **model_inputs)
+    with pytest.raises(AudioFitContractError, match=message):
+        prepare_audio(processor, "clip.wav")
 
 
 def test_gemma_preparation_rejects_wrong_exact_framing_non_skippably():
@@ -325,9 +348,7 @@ def test_replay_validates_shape_and_remains_repeatable_after_encode():
 
 
 def test_root_loader_delegates_and_preserves_signature_and_tuple(monkeypatch):
-    runtime = types.SimpleNamespace(
-        processor=object(), model=object(), text_lens_model=object()
-    )
+    runtime = types.SimpleNamespace(processor=object(), model=object(), text_lens_model=object())
     lens = object()
     calls = []
 

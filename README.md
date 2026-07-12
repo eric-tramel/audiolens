@@ -1,8 +1,9 @@
 # audiolens
 
-Audiolens fits Jacobian lenses for audio-input language models on text and
-real audio soft-token inputs, then reads the model workspace over audio
-positions. The first target is `google/gemma-4-E2B-it`.
+Audiolens fits a context-general Jacobian lens for an audio-input language
+model, applies it to text or audio-token residuals, and keeps the resulting
+J-lens readout distinct from downstream mood/prosody summaries. The first
+target is `google/gemma-4-E2B-it`.
 
 ## Fresh-clone setup
 
@@ -38,6 +39,170 @@ Audit it against the target tokenizer with:
 uv run python scripts/anchor_report.py
 ```
 
+## Canonical text J-lens and workspace-like evaluation
+
+The canonical lens follows Anthropic's released Jacobian estimator with one
+independent transport matrix per source layer. For each valid source position,
+it sums the effects on current and future valid targets, then takes the mean
+over valid source positions within each prompt and an equal mean over
+successful prompts. It fits exactly 1,000
+raw-text, 128-token sequences using Neuronpedia's reproducible WikiText-103
+concatenation and rechunking recipe. The fit is text-only by design: broad
+context averaging estimates a general disposition to verbalize, while the same
+decoder-space lens can later be applied at audio positions.
+
+Run the full canonical fit:
+
+```bash
+uv run modal run scripts/modal_fit_lens.py
+```
+
+The command prints content-addressed manifest and lens paths on
+`audiolens-vol`, plus exact `modal volume get` commands. A lower
+`--n-prompts` value is available for integration smoke tests, but those
+artifacts are explicitly noncanonical.
+
+Evaluate the completed 1,000-prompt artifact with the six prompt distributions
+released alongside Anthropic's technical report:
+
+```bash
+uv run modal run scripts/modal_workspace_eval.py \
+  --fit-manifest /vol/runs/<fit-manifest>.json \
+  --lens /vol/lenses/<lens>.pt
+modal volume get audiolens-vol eval/<workspace-report>.json eval/
+uv run python scripts/sanity_check.py \
+  --report eval/<workspace-report>.json
+```
+
+The evaluator preserves every item, layer, and concept rank; compares the
+J-lens with logit-lens, transposed, permuted, and label-permutation controls;
+and tests the preregistered Gemma range L13-L31 against early L0-L12 and motor
+L32-L33 behavior. It never searches for a better band after seeing results.
+The report ends in either `validated` or `no_band`; both are complete outcomes.
+Only `validated` supports the narrow claim that this fixed range is
+workspace-like for this model and lens.
+
+### Observed canonical result
+
+The fully source-bound run from commit `eafe7cc` completed all 1,000 prompts:
+
+- fit config `7464e4104cde5f7d12110ed8b8f4fa90b0819edd92096a2e1bc8b8d826294568`;
+- fp16 lens SHA-256
+  `a0b0e6fb29c1eaf5c3d02e05a591e08cc9d43ef916020c5fcdb76c325b08529c`;
+- evaluation config
+  `6284af5fa0f5ae5753cbc8831e3cfed7be111412824dc16a1c4218f70fca393a`;
+  and
+- report SHA-256
+  `16413a02d95aeada2e7a36a70fe100cc61c1d7138620ae0fdd1f0fdcd4791028`.
+
+The preregistered result is **`no_band`**. Eight of nine criteria passed, but
+the candidate-minus-logit AUC was negative on the poetry distribution
+(`-0.02016`), violating the requirement that every distribution be
+nonnegative. The equal-distribution candidate-band AUC was `0.50648` versus
+`0.27278` for the logit lens, and the paired-bootstrap lower 95% bound for
+their difference was `0.20521`; those aggregate results do not override the
+failed per-distribution gate. No alternate band was searched.
+
+A separate transfer-only smoke applied this exact lens on a Modal H100 across
+L0-L33 and all audio positions in two fixed RAVDESS clips (83 and 82
+positions). Its complete layer-by-position top-token record is retained on
+`audiolens-vol` as
+`eval/gemma-4-E2B-it-audio-transfer-196110a9f3b8533da8c68febcf1962b48b6ac5a7ece8a397f3bff8a088a2cceb.json`.
+It demonstrates that the corrected text lens executes on real audio
+residuals; it is not a workspace-band, mood, or artifact-promotion result.
+
+This does **not** compute a formal J-space component. The report defines
+J-space components as sparse nonnegative combinations of J-lens vectors, but
+neither Anthropic's released package nor Neuronpedia's public J-lens serving
+path includes that gradient-pursuit decomposition.
+
+## Source-bound audio J-lens
+
+The canonical audio fit is a separate, waveform-only application of Anthropic's
+released estimator. It selects exactly 1,000 LibriSpeech utterances: 500 from
+`clean/train.360` and 500 from `other/train.500`, alternating strata in fit
+order with one 2–4 second, native-mono 16 kHz clip per globally unique speaker.
+Selection uses SHA-256 speaker and utterance ranks over the complete pinned
+metadata pool, not stream order. The exact source transcript is retained and
+hashed as pair provenance but is never passed to `jlens.fit`.
+
+Every accepted waveform is decoded, processed through Gemma's pinned
+audio-to-decoder path, and admitted only when its audio span is contiguous and
+has at least one stock-valid source position after `skip_first=16`. The fit then
+uses the same stock prompt-level estimator as the text lens: one independent
+fp32 running-sum matrix per L0–L33 source layer, target L34, and equal weight per
+successful waveform. No audio/text merge, semantic evaluator, layer-band
+selection, publication, or workspace claim is part of this run.
+
+Run the source, selection, restore, replay, smoke-resume, and full-fit gates in
+order:
+
+```bash
+uv run modal run scripts/modal_fit_audio_lens.py --rank-source-only
+uv run modal run scripts/modal_fit_audio_lens.py --stage-corpus-only \
+  --source-pool-sha256 <source-pool-sha256>
+uv run modal run scripts/modal_fit_audio_lens.py --selection-replay-only \
+  --source-pool-sha256 <source-pool-sha256> \
+  --ordered-corpus-sha256 <ordered-corpus-sha256>
+uv run modal run scripts/modal_fit_audio_lens.py --restore-source-only \
+  --ordered-corpus-sha256 <ordered-corpus-sha256>
+uv run modal run scripts/modal_fit_audio_lens.py --preflight-only \
+  --ordered-corpus-sha256 <ordered-corpus-sha256>
+uv run modal run scripts/modal_fit_audio_lens.py --replay-parity-only \
+  --ordered-corpus-sha256 <ordered-corpus-sha256>
+uv run modal run scripts/modal_fit_audio_lens.py --smoke-only \
+  --ordered-corpus-sha256 <ordered-corpus-sha256>
+uv run modal run scripts/modal_fit_audio_lens.py --fit \
+  --ordered-corpus-sha256 <ordered-corpus-sha256>
+```
+
+The selection replay, source restore, all-1,000 processor replay, two-row
+decoder replay, and separately persisted 10→20 resume each seal a
+content-addressed gate bound to the immutable fit configuration. The production
+fit will not allocate an H100 until all five gates validate. The full run
+preserves an immutable 500-example prefix snapshot and emits only two per-layer
+convergence diagnostics: identity-centered split-half cosine and
+first-half-to-full relative L2. The final fp16 lens is validated
+matrix-for-matrix against the 1,000-example fp32 running sums. Corpus, source
+pool, attempt ledger, checkpoint, gate, stability report, and lens identities
+are all content-bound in the completed run manifest on `audiolens-vol`.
+
+This contract is schema v2. It intentionally rejects partial or completed v1
+runs rather than reusing artifacts that predate checkpoint identity stamps and
+durable execution gates.
+
+### Observed source-bound audio fit
+
+The complete H100 run passed all five execution gates and fitted all 1,000
+waveforms:
+
+- source pool: 252,702 pinned LibriSpeech rows (104,014 clean, 148,688 other);
+- selected corpus: 500 clean + 500 other clips, 30,848 audited attempts,
+  ordered-corpus SHA-256
+  `1f194155b47db48726878c6026c507ca01b65d3e50736eab5dbea2c1bbc8c966`;
+- implementation source SHA-256:
+  `ccdb307a6ea9bf90aa1f8fae075dd9ec54b7ffb6c5738276cd896b6f96086c80`;
+- fit config:
+  `ee7cd4e42991fec5a00b4256ba466ff163ebd64fa22963334033066e7d531275`;
+- final fp32 checkpoint: `n_done=next_idx=1000`, SHA-256
+  `e764083944c3022b4c58f4ee58747691691cedab9c8fd2dd33f57e8006d8a724`;
+- validated fp16 lens: 160,439,813 bytes, SHA-256
+  `da0ccabf1ee14e4df060f97f31cf0132a0d3f6ed2cb45b6c77738693bc8f1aa9`;
+- stability report:
+  `b1ddd375af8029cc529ae5f6ab0e3ad7c9d2d179ef2097e8adff28791e27d6f7`.
+
+Across L0–L33, the median identity-centered split-half cosine was `0.999894`
+and the median first-half-to-full relative L2 was `0.02233`. The least stable
+direction was L3 (`0.989104` cosine); the largest relative change was L0
+(`0.08746`). Descriptively, first-half-to-full change decreased with depth:
+mean relative L2 was `0.05540` over L0–L12, `0.02085` over L13–L22, and
+`0.01243` over L23–L33.
+
+These measurements establish a reproducible audio-conditioned J-lens. The
+preregistered protocol does not define a convergence threshold, so these
+descriptive diagnostics do not by themselves establish convergence, identify
+a formal J-space component, or support a workspace-region claim.
+
 ## Mixed WikiText and LibriSpeech fit
 
 The reproducible mixed experiment refits the existing 400-prompt WikiText
@@ -69,7 +234,8 @@ uv run modal run scripts/modal_fit_mixed_lens.py
 
 The fit is content-addressed by ordered corpus hashes, exact model/data
 revisions, the frozen `uv.lock`, attention backend, code digest, and estimator
-settings. It never overwrites the generic text-only lens.
+settings. It remains a separate historical audio-local/mixed-corpus experiment
+and cannot select the canonical J-lens or its workspace-like layer range.
 
 ## Opt-in Hugging Face publication
 
